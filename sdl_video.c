@@ -21,7 +21,12 @@
 /* Defines */
 
 /* Variables */
+#ifdef PLATFORM_ATARI
+/* update_scrn writes this through uint64_t pointers; the 68000 faults on odd addresses */
+unsigned char vga_graphmemory[DISPLAY_F_WIDTH * DISPLAY_F_HEIGHT] __attribute__((aligned(2)));
+#else
 unsigned char vga_graphmemory[DISPLAY_F_WIDTH * DISPLAY_F_HEIGHT];
+#endif
 
 /* \x1 means that a value needs to be placed here.
  * \x2 means to invert the colours.
@@ -214,8 +219,15 @@ int sdl_video_setmode(void) {
 	 * 
 	 * sz81 uses alpha and so it must use an SDL_SWSURFACE */
 	do {
-		video.screen = SDL_SetVideoMode(video.xres, video.yres, 16,
-			SDL_SWSURFACE | SDL_ANYFORMAT | video.fullscreen);
+		#ifdef PLATFORM_ATARI
+			/* Without SDL_ANYFORMAT SDL emulates 16bpp on bitplane modes;
+			 * sz81 can only draw into 16 and 32bpp surfaces */
+			video.screen = SDL_SetVideoMode(video.xres, video.yres, 16,
+				SDL_SWSURFACE | video.fullscreen);
+		#else
+			video.screen = SDL_SetVideoMode(video.xres, video.yres, 16,
+				SDL_SWSURFACE | SDL_ANYFORMAT | video.fullscreen);
+		#endif
 		if (video.screen == NULL) {
 			fprintf(stderr, "%s: Cannot set video mode: %i x %i: %s\n",
 				__func__, video.xres, video.yres, SDL_GetError());

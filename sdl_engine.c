@@ -57,6 +57,9 @@ int sdl_init(void) {
 	#elif defined(PLATFORM_ZAURUS)
 		video.xres = 640; video.yres = 480; video.scale = 2;
 		video.fullscreen = SDL_FULLSCREEN;
+	#elif defined(PLATFORM_ATARI)
+		video.xres = DISPLAY_N_WIDTH; video.yres = DISPLAY_N_HEIGHT; video.scale = 1;
+		video.fullscreen = SDL_FULLSCREEN;
 	#else
 		video.xres = DISPLAY_N_WIDTH * 2; video.yres = DISPLAY_N_HEIGHT * 2; video.scale = 2;
 		video.fullscreen = FALSE;
@@ -172,6 +175,22 @@ int sdl_init(void) {
 	}
 
 	atexit(clean_up_before_exit);
+
+	#ifdef PLATFORM_ATARI
+		/* Under a multitasking AES SDL uses its GEM driver, whose fullscreen
+		 * mode paints over the other applications: open a window instead,
+		 * at double size when the desktop has room for it */
+		if (atari_gem_driver()) {
+			const SDL_VideoInfo *info = SDL_GetVideoInfo();
+
+			video.fullscreen = FALSE;
+			if (info && info->current_w >= DISPLAY_N_WIDTH * 2 + 32 &&
+				info->current_h >= DISPLAY_N_HEIGHT * 2 + 64) {
+				video.xres = DISPLAY_N_WIDTH * 2; video.yres = DISPLAY_N_HEIGHT * 2;
+				video.scale = 2;
+			}
+		}
+	#endif
 
 	/* Set WM icon and title if required for platform before
 	 * setting a video mode as per SDL docs instructions */
@@ -616,9 +635,21 @@ int runtime_options_which(void) {
  * Timer Initialise                                                        *
  ***************************************************************************/
 
+#ifdef PLATFORM_ATARI
+/* The MiNT SDL has no threads, so SDL_AddTimer always fails there;
+ * the single SDL_SetTimer alarm is polled from SDL_Delay instead */
+static Uint32 emulator_alarm(Uint32 interval) {
+	return emulator_timer(interval, NULL);
+}
+#endif
+
 void sdl_timer_init(void) {
 	/* Create a 10ms timer */
-	sdl_emulator.timer_id = SDL_AddTimer (10, emulator_timer, NULL);
+	#ifdef PLATFORM_ATARI
+		SDL_SetTimer (10, emulator_alarm);
+	#else
+		sdl_emulator.timer_id = SDL_AddTimer (10, emulator_timer, NULL);
+	#endif
 }
 
 /***************************************************************************
@@ -728,7 +759,11 @@ void clean_up_before_exit(void) {
 		sdl_sound_end();
 	#endif
 
-	if (sdl_emulator.timer_id) SDL_RemoveTimer (sdl_emulator.timer_id);
+	#ifdef PLATFORM_ATARI
+		SDL_SetTimer (0, NULL);
+	#else
+		if (sdl_emulator.timer_id) SDL_RemoveTimer (sdl_emulator.timer_id);
+	#endif
 
 	if (rcfile.rewrite) rcfile_write();
 

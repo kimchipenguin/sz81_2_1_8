@@ -29,9 +29,16 @@
 
 // Sizes for normal display
 #define DISPLAY_N_WIDTH       320
+#ifdef PLATFORM_ATARI
+// ST low resolution has only 200 lines, so trim the top and bottom borders
+#define DISPLAY_N_HEIGHT      200
+#define DISPLAY_N_START_X     46
+#define DISPLAY_N_START_Y     44
+#else
 #define DISPLAY_N_HEIGHT      240
 #define DISPLAY_N_START_X     46
 #define DISPLAY_N_START_Y     24
+#endif
 #define DISPLAY_N_PIXEL_OFF   4
 
 // Size for 576 line display (as for PAL TV)

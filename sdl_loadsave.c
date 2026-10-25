@@ -544,6 +544,13 @@ int sdl_load_file(int parameter, int method) {
 		#ifdef __amigaos4__
 			strcpy(fullpath, amiga_file_request_retval);
 		#else
+			#ifdef PLATFORM_ATARI
+			if (atari_file_request_retval) {
+				strcpy(fullpath, atari_file_request_retval);
+				atari_file_request_retval = NULL;
+			} else
+			#endif
+			{
 			/* Build a path from the last entered directory */
 			strcpy(fullpath, load_file_dialog.dir);
 			/* Add a directory delimiter if required */
@@ -551,6 +558,7 @@ int sdl_load_file(int parameter, int method) {
 			/* Add load_file_dialog.selected item */
 			strcat(fullpath, load_file_dialog.dirlist +
 				load_file_dialog.dirlist_selected * load_file_dialog.dirlist_sizeof);
+			}
 		#endif
 	} else if (method == LOAD_FILE_METHOD_SELECTLOAD) {
 		/* Let the load file dialog know what we are doing */
@@ -561,12 +569,21 @@ int sdl_load_file(int parameter, int method) {
 			if ((amiga_file_request_retval = amiga_file_request("SZ81: Load file", FALSE)) != NULL)
 				load_file_dialog.method = LOAD_FILE_METHOD_SELECTLOADOK;
 		#else
+			#ifdef PLATFORM_ATARI
+			if (atari_aes_available()) {
+				/* This will return NULL if the user cancelled */
+				if ((atari_file_request_retval = atari_file_request("LOAD")) != NULL)
+					load_file_dialog.method = LOAD_FILE_METHOD_SELECTLOADOK;
+			} else
+			#endif
+			{
 			/* Show the load file dialog */
 			toggle_ldfile_state();
 
 			/* Wait for the user to select Load or Exit
 			 * which will close the dialog */
 			emulator_hold(&load_file_dialog.state);
+			}
 		#endif
 
 		/* If Load was selected then the method will have been updated */
@@ -574,6 +591,13 @@ int sdl_load_file(int parameter, int method) {
 			#ifdef __amigaos4__
 				strcpy(fullpath, amiga_file_request_retval);
 			#else
+				#ifdef PLATFORM_ATARI
+				if (atari_file_request_retval) {
+					strcpy(fullpath, atari_file_request_retval);
+					atari_file_request_retval = NULL;
+				} else
+				#endif
+				{
 				/* Build a path from the last entered directory */
 				strcpy(fullpath, load_file_dialog.dir);
 				/* Add a directory delimiter if required */
@@ -581,6 +605,7 @@ int sdl_load_file(int parameter, int method) {
 				/* Add load_file_dialog.selected item */
 				strcat(fullpath, load_file_dialog.dirlist +
 					load_file_dialog.dirlist_selected * load_file_dialog.dirlist_sizeof);
+				}
 			#endif
 		} else {
 			retval = TRUE;

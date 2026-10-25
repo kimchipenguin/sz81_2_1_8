@@ -44,7 +44,15 @@ unsigned char *vptr;
  ***************************************************************************/
 /* redraw the screen */
 
-static const uint64_t lookup[] = {
+/* The tables put the leftmost pixel in the lowest byte; big-endian
+ * hosts byte-swap them once in update_scrn */
+#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+	#define LOOKUP_CONST
+#else
+	#define LOOKUP_CONST const
+#endif
+
+static LOOKUP_CONST uint64_t lookup[] = {
 									0x0f0f0f0f0f0f0f0f,
 									0x000f0f0f0f0f0f0f,
 									0x0f000f0f0f0f0f0f,
@@ -303,7 +311,7 @@ static const uint64_t lookup[] = {
 									0x0000000000000000
 								  };
 
-static const uint64_t lookupv[] = {
+static LOOKUP_CONST uint64_t lookupv[] = {
 									0x0000000000000000,
 									0x0f00000000000000,
 									0x000f000000000000,
@@ -565,6 +573,18 @@ static const uint64_t lookupv[] = {
 void update_scrn(void) {
 	int x, y;
 	unsigned char* ptr = scrnbmp;
+
+	#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+		static bool swapped = false;
+
+		if (!swapped) {
+			for (x = 0; x < 256; x++) {
+				lookup[x] = SDL_Swap64(lookup[x]);
+				lookupv[x] = SDL_Swap64(lookupv[x]);
+			}
+			swapped = true;
+		}
+	#endif
 
 	if (!chromamode)
 	{

@@ -2699,6 +2699,17 @@ void toggle_ldfile_state(void) {
 				emulator_reset();
 			}
 		#else
+			#ifdef PLATFORM_ATARI
+			if (atari_aes_available()) {
+				/* This will return NULL if the user cancelled */
+				if ((atari_file_request_retval = atari_file_request("Load program")) != NULL) {
+					load_file_dialog.method = LOAD_FILE_METHOD_FORCEDLOAD;
+					sdl_emulator.autoload = TRUE;
+					/* Reset the emulator */
+					emulator_reset();
+				}
+			} else
+			#endif
 			if (!load_file_dialog.state) {
 				/* Force select the Load hotspot */
 				hotspots[get_selected_hotspot(HS_GRP_LDFILE)].flags &= ~HS_PROP_SELECTED;

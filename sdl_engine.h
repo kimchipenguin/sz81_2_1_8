@@ -33,6 +33,9 @@
 #ifdef __amigaos4__
 	#include "amiga.h" /* Amiga-specifics */
 #endif
+#ifdef PLATFORM_ATARI
+	#include "atari.h" /* GEM file selector */
+#endif
 
 #include "common.h"
 #include "sound.h"

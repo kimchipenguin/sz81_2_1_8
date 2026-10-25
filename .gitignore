@@ -54,3 +54,5 @@ dkms.conf
 
 # RiscOS
 riscroot
+obj-atari*/
+*.tos
