@@ -8,5 +8,6 @@ extern char *atari_file_request_retval;
 int atari_gem_driver(void);
 int atari_aes_available(void);
 char *atari_file_request(const char *title);
+void atari_poll(void);
 
 #endif

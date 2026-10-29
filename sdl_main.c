@@ -30,6 +30,9 @@
 #ifdef __amigaos4__
 	#include "amiga.h"
 #endif
+#ifdef PLATFORM_ATARI
+	#include "atari.h"
+#endif
 
 /* Defines */
 
@@ -647,6 +650,11 @@ void update_scrn(void) {
 
 void check_events(void) {
 	int b, y;
+
+	#ifdef PLATFORM_ATARI
+		/* Key events from the IKBD and the menu bar in a GEM window */
+		atari_poll();
+	#endif
 
 	keyboard_update();
 

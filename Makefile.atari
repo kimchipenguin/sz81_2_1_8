@@ -3,7 +3,13 @@
 #
 #   make -f Makefile.atari                 plain 68000 (ST, STE, Mega STE)
 #   make -f Makefile.atari CPU=-m68020-60  68020-68060 with FPU (TT, Falcon)
-#                                          -> sz81_68020-60.tos
+#                                          -> sz81_68020-60.app
+#
+# By default the toolchain's SDL is used. SDL_PREFIX points to a directory
+# holding an SDL build per CPU instead (<SDL_PREFIX>/m68000, .../m68020-60),
+# e.g. a current upstream SDL-1.2 whose GEM driver has real key releases:
+#
+#   make -f Makefile.atari SDL_PREFIX=~/Develop/atari-mint-sdl/sdl-install
 #
 # The binary runs from the folder holding the data directory.
 
@@ -19,14 +25,14 @@ PACKAGE_DATA_DIR?=data
 SOUNDDEF=-DOSS_SOUND_SUPPORT
 
 ifeq ($(CPU),-m68000)
-TARGET=sz81.tos
+TARGET=sz81.app
 else
-TARGET=sz81$(subst -m,_,$(CPU)).tos
+TARGET=sz81$(subst -m,_,$(CPU)).app
 endif
 SOURCES=sdl_main.c common.c sound.c z80.c loadp.c sdl_engine.c sdl_hotspots.c \
 	sdl_input.c sdl_loadsave.c sdl_resources.c sdl_sound.c sdl_video.c atari.c
 OBJDIR=obj-atari$(subst -,_,$(CPU))
-OBJECTS=$(patsubst %.c, $(OBJDIR)/%.o, $(SOURCES))
+OBJECTS=$(patsubst %.c, $(OBJDIR)/%.o, $(SOURCES)) $(OBJDIR)/atari_ikbd.o
 VERSION=$(shell cat VERSION)
 
 CFLAGS=$(CPU) -O2 -fomit-frame-pointer
@@ -35,6 +41,13 @@ CFLAGS+=-Wall -fcommon -Wno-unused-result -D_GNU_SOURCE=1 -DVERSION=\"$(VERSION)
 CFLAGS+=$(EXTRA_CFLAGS)
 LDFLAGS=$(CPU)
 LIBS=-lSDL -lgem -lm
+
+ifneq ($(SDL_PREFIX),)
+SDL_DIR=$(SDL_PREFIX)/$(patsubst -%,%,$(CPU))
+# sz81 includes <SDL/SDL.h>, so the include directory itself goes first
+CFLAGS+=-I$(SDL_DIR)/include
+LIBS:=-L$(SDL_DIR)/lib $(LIBS)
+endif
 
 all: $(TARGET)
 
@@ -45,10 +58,13 @@ $(TARGET): $(OBJECTS)
 $(OBJDIR)/%.o: %.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJDIR)/%.o: %.S | $(OBJDIR)
+	$(CC) $(CPU) -c $< -o $@
+
 $(OBJDIR):
 	mkdir -p $@
 
 .PHONY: all clean
 
 clean:
-	rm -rf obj-atari* sz81*.tos
+	rm -rf obj-atari* sz81*.app sz81*.tos
