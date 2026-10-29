@@ -1,0 +1,33 @@
+diff --git a/src/video/gem/SDL_gemevents.c b/src/video/gem/SDL_gemevents.c
+index 7ba7995..6a3c8fd 100644
+--- a/src/video/gem/SDL_gemevents.c
++++ b/src/video/gem/SDL_gemevents.c
+@@ -184,6 +184,16 @@ void GEM_PumpEvents(_THIS)
+ 	}
+ }
+ 
++/* Local addition (not upstream): messages the driver does not handle, such
++   as menu selections, are passed on to the application */
++
++static int (*GEM_message_hook)(const short *message);
++
++void SDL_AtariGem_SetMessageHook(int (*hook)(const short *message))
++{
++	GEM_message_hook = hook;
++}
++
+ static int do_messages(_THIS, short *message, short latest_msg_id)
+ {
+ 	int quit, update_work_area, sdl_resize;
+@@ -292,6 +302,11 @@ static int do_messages(_THIS, short *message, short latest_msg_id)
+ 			VDI_setpalette(this, VDI_oldpalette);
+ 			SDL_Atari_RestoreConsoleSettings();
+ 			break;
++		default:
++			if (GEM_message_hook) {
++				GEM_message_hook(message);
++			}
++			break;
+ 	}
+ 
+ 	if (update_work_area) {

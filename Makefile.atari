@@ -7,9 +7,11 @@
 #
 # By default the toolchain's SDL is used. SDL_PREFIX points to a directory
 # holding an SDL build per CPU instead (<SDL_PREFIX>/m68000, .../m68020-60),
-# e.g. a current upstream SDL-1.2 whose GEM driver has real key releases:
+# such as the one atari/build-sdl.sh makes: upstream SDL-1.2 with a patch
+# that lets the menu bar work in a GEM window:
 #
-#   make -f Makefile.atari SDL_PREFIX=~/Develop/atari-mint-sdl/sdl-install
+#   atari/build-sdl.sh
+#   make -f Makefile.atari SDL_PREFIX=atari/sdl-install
 #
 # The binary runs from the folder holding the data directory.
 
