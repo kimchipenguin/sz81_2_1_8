@@ -9,5 +9,7 @@ int atari_gem_driver(void);
 int atari_aes_available(void);
 char *atari_file_request(const char *title);
 void atari_poll(void);
+void atari_audio_probe(void);
+void atari_audio_diagnose(void);
 
 #endif

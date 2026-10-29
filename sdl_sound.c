@@ -34,7 +34,7 @@
  *          returns TRUE on error */
 
 int sdl_sound_init(int freq, int *stereo, int *sixteenbit) {
-	SDL_AudioSpec desired, obtained;
+	SDL_AudioSpec desired, obtained, *hardware = &obtained;
 	
 	sdl_sound.buffer_start = sdl_sound.buffer_end = 0;
 	
@@ -54,13 +54,26 @@ int sdl_sound_init(int freq, int *stereo, int *sixteenbit) {
 	desired.callback = sdl_sound_callback;
 	desired.userdata = NULL;
 
+	#ifdef PLATFORM_ATARI
+		/* SDL looks for an audio driver only once; another program may
+		 * have given the sound up since */
+		atari_audio_probe();
+		/* The Falcon plays only signed samples at its own rates, which
+		 * sz81 cannot produce: have SDL convert from what was asked */
+		hardware = NULL;
+	#endif
+
 	/* Open the audio device */
-	if (SDL_OpenAudio(&desired, &obtained) < 0 ) {
+	if (SDL_OpenAudio(&desired, hardware) < 0 ) {
 		fprintf(stderr, "%s: Couldn't open audio: %s\n", __func__, SDL_GetError());
+		#ifdef PLATFORM_ATARI
+			atari_audio_diagnose();
+		#endif
 		return TRUE;
 	}
 
 	sdl_sound.state = TRUE;
+	if (hardware == NULL) obtained = desired;
 
 	*stereo = obtained.channels - 1;
 	*sixteenbit = (obtained.format & 0xff) / 16;

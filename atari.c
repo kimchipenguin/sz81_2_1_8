@@ -27,6 +27,7 @@
 #include <mint/osbind.h>
 #include <mint/cookie.h>
 #include <mint/ostruct.h>
+#include <mint/falcon.h>
 #include "sdl_engine.h"
 #include "atari.h"
 
@@ -659,3 +660,41 @@ char *atari_file_request(const char *title) {
 	return fname;
 }
 
+/***************************************************************************
+ * Audio                                                                   *
+ ***************************************************************************/
+/* SDL's XBIOS sound driver (Falcon, ARAnyM) only counts itself available
+ * when it can take the sound lock, which another program holds for as long
+ * as it uses the sound (also while paused), and SDL looks for a driver only
+ * at SDL_Init. Look again before opening, so the sound can be chosen again
+ * once the other program has quit. */
+
+void atari_audio_probe(void) {
+	char name[16];
+
+	if (!SDL_AudioDriverName(name, sizeof(name))) {
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
+		SDL_InitSubSystem(SDL_INIT_AUDIO);
+	}
+}
+
+/* When SDL_OpenAudio fails, say why */
+
+void atari_audio_diagnose(void) {
+	char name[16];
+	long lock;
+
+	if (SDL_AudioDriverName(name, sizeof(name))) {
+		fprintf(stderr, "Atari audio: SDL driver %s could not open\n", name);
+		return;
+	}
+	lock = Locksnd();
+	if (lock == 1) {
+		Unlocksnd();
+		fprintf(stderr, "Atari audio: no SDL audio driver, but the XBIOS sound lock is free\n");
+	} else {
+		fprintf(stderr, "Atari audio: no SDL audio driver; Locksnd() = %ld (%s)\n", lock,
+			lock == SNDLOCKED ? "another program is using the sound, "
+			"quit it and choose the sound device again" : "no XBIOS sound");
+	}
+}
