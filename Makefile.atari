@@ -42,7 +42,7 @@ CFLAGS+=-Wall -fcommon -Wno-unused-result -D_GNU_SOURCE=1 -DVERSION=\"$(VERSION)
 	-DPLATFORM_ATARI -DPACKAGE_DATA_DIR=\"$(PACKAGE_DATA_DIR)\" $(SOUNDDEF) -DLOAD_AND_SAVE
 CFLAGS+=$(EXTRA_CFLAGS)
 LDFLAGS=$(CPU)
-LIBS=-lSDL -lgem -lm
+LIBS=-lSDL -lgem -lz -lm
 
 ifneq ($(SDL_PREFIX),)
 SDL_DIR=$(SDL_PREFIX)/$(patsubst -%,%,$(CPU))

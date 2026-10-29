@@ -1853,10 +1853,18 @@ void save_screenshot(void) {
 	 * (it'll return 0 if the directory couldn't be opened or 1 as
 	 * the base number when no files exist that match the pattern) */
 	nextnum = get_filename_next_highest(fullpath, "scnsht%4d");
-	sprintf(filename, "scnsht%04i.bmp", nextnum);
+	#ifdef PLATFORM_ATARI
+		sprintf(filename, "scnsht%04i.png", nextnum);
+	#else
+		sprintf(filename, "scnsht%04i.bmp", nextnum);
+	#endif
 	strcat(fullpath, filename);
 
+	#ifdef PLATFORM_ATARI
+	if (atari_save_png(video.screen, fullpath) < 0) {
+	#else
 	if (SDL_SaveBMP(video.screen, fullpath) < 0) {
+	#endif
 		fprintf(stderr, "%s: Cannot save screenshot: %s\n", __func__,
 			SDL_GetError());
 	}

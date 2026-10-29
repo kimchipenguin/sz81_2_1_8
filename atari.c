@@ -28,6 +28,7 @@
 #include <mint/cookie.h>
 #include <mint/ostruct.h>
 #include <mint/falcon.h>
+#include <zlib.h>
 #include "sdl_engine.h"
 #include "atari.h"
 
@@ -658,6 +659,89 @@ char *atari_file_request(const char *title) {
 	strcat(fname, name);
 
 	return fname;
+}
+
+/***************************************************************************
+ * PNG screenshots                                                         *
+ ***************************************************************************/
+/* A plain 24-bit RGB PNG made with zlib. The rows are compressed one at a
+ * time into IDAT chunks, so even a big window needs only small buffers. */
+
+static void png_be32(unsigned char *p, unsigned long v) {
+	p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
+}
+
+static int png_chunk(FILE *fp, const char *type, const unsigned char *data, unsigned long len) {
+	unsigned char head[8], crc[4];
+	unsigned long sum;
+
+	png_be32(head, len);
+	memcpy(head + 4, type, 4);
+	sum = crc32(0L, head + 4, 4);
+	if (len) sum = crc32(sum, data, len);
+	png_be32(crc, sum);
+	return fwrite(head, 8, 1, fp) == 1 && (!len || fwrite(data, len, 1, fp) == 1) &&
+		fwrite(crc, 4, 1, fp) == 1;
+}
+
+static Uint32 png_pixel(SDL_Surface *s, int x, int y) {
+	Uint8 *p = (Uint8 *)s->pixels + y * s->pitch + x * s->format->BytesPerPixel;
+
+	switch (s->format->BytesPerPixel) {
+		case 1: return *p;
+		case 2: return *(Uint16 *)p;
+		case 4: return *(Uint32 *)p;
+	}
+	return 0;
+}
+
+/* On exit: returns 0 on success else -1 */
+
+int atari_save_png(SDL_Surface *surface, const char *filename) {
+	static const unsigned char signature[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+	unsigned char ihdr[13], out[16384], *row;
+	int x, y, w = surface->w, h = surface->h, ok, flush;
+	z_stream z;
+	FILE *fp;
+
+	if ((row = malloc(1 + 3 * w)) == NULL) return -1;
+	if ((fp = fopen(filename, "wb")) == NULL) {
+		free(row);
+		return -1;
+	}
+	png_be32(ihdr, w);
+	png_be32(ihdr + 4, h);
+	ihdr[8] = 8;	/* bits per channel */
+	ihdr[9] = 2;	/* RGB */
+	ihdr[10] = ihdr[11] = ihdr[12] = 0;
+	ok = fwrite(signature, 8, 1, fp) == 1 && png_chunk(fp, "IHDR", ihdr, 13);
+
+	memset(&z, 0, sizeof(z));
+	ok = ok && deflateInit(&z, Z_DEFAULT_COMPRESSION) == Z_OK;
+	if (SDL_MUSTLOCK(surface)) SDL_LockSurface(surface);
+	for (y = 0; ok && y < h; y++) {
+		row[0] = 0;	/* no filter */
+		for (x = 0; x < w; x++)
+			SDL_GetRGB(png_pixel(surface, x, y), surface->format,
+				&row[1 + 3 * x], &row[2 + 3 * x], &row[3 + 3 * x]);
+		z.next_in = row;
+		z.avail_in = 1 + 3 * w;
+		flush = y == h - 1 ? Z_FINISH : Z_NO_FLUSH;
+		do {
+			z.next_out = out;
+			z.avail_out = sizeof(out);
+			if (deflate(&z, flush) == Z_STREAM_ERROR) ok = FALSE;
+			if (sizeof(out) - z.avail_out)
+				ok = ok && png_chunk(fp, "IDAT", out, sizeof(out) - z.avail_out);
+		} while (ok && (z.avail_in || (flush == Z_FINISH && z.avail_out == 0)));
+	}
+	if (SDL_MUSTLOCK(surface)) SDL_UnlockSurface(surface);
+	deflateEnd(&z);
+	ok = ok && png_chunk(fp, "IEND", NULL, 0);
+	ok = (fclose(fp) == 0) && ok;
+	free(row);
+	if (!ok) remove(filename);
+	return ok ? 0 : -1;
 }
 
 /***************************************************************************
