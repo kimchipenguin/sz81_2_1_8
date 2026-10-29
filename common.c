@@ -40,6 +40,9 @@ int memattr[64];
 
 int help=0;
 int sound=0;
+#ifdef PLATFORM_ATARI
+int atari_display_lines=200;
+#endif
 int sound_vsync=0,sound_ay=0,sound_ay_type=AY_TYPE_NONE;
 int invert_screen=0;
 

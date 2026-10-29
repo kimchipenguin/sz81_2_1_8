@@ -30,10 +30,12 @@
 // Sizes for normal display
 #define DISPLAY_N_WIDTH       320
 #ifdef PLATFORM_ATARI
-// ST low resolution has only 200 lines, so trim the top and bottom borders
-#define DISPLAY_N_HEIGHT      200
+// ST low resolution has only 200 lines, so fullscreen trims the top and
+// bottom borders; a GEM window shows all 240 (set in sdl_init)
+extern int atari_display_lines;
+#define DISPLAY_N_HEIGHT      atari_display_lines
 #define DISPLAY_N_START_X     46
-#define DISPLAY_N_START_Y     44
+#define DISPLAY_N_START_Y     (24 + (240 - atari_display_lines) / 2)
 #else
 #define DISPLAY_N_HEIGHT      240
 #define DISPLAY_N_START_X     46

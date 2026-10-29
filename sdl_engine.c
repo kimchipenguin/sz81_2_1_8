@@ -184,6 +184,8 @@ int sdl_init(void) {
 			const SDL_VideoInfo *info = SDL_GetVideoInfo();
 
 			video.fullscreen = FALSE;
+			atari_display_lines = 240;
+			video.xres = DISPLAY_N_WIDTH; video.yres = DISPLAY_N_HEIGHT;
 			if (info && info->current_w >= DISPLAY_N_WIDTH * 2 + 32 &&
 				info->current_h >= DISPLAY_N_HEIGHT * 2 + 64) {
 				video.xres = DISPLAY_N_WIDTH * 2; video.yres = DISPLAY_N_HEIGHT * 2;

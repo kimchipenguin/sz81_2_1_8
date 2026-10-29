@@ -311,7 +311,7 @@ static void push_key(int sc, int pressed) {
 
 static int menu_pick;	/* menu item waiting to be acted on, 0 if none */
 
-static void menu_shortcut(int sc);
+static int menu_shortcut(int sc);
 
 /* Turn the key changes since the last pump into SDL key events: modifier
  * presses first, so Shift+P reaches the ZX81 as Shift+P, and modifier
@@ -340,8 +340,7 @@ static void ikbd_pump(void) {
 
 	for (sc = 1; sc < 128; sc++) {
 		if (is_modifier(sc)) continue;
-		if (hit[sc] && now[SC_CTRL] && (scan_sym[sc] == SDLK_o || scan_sym[sc] == SDLK_q)) {
-			menu_shortcut(sc);
+		if (hit[sc] && now[SC_CTRL] && menu_shortcut(sc)) {
 			now[sc] = 0;
 			continue;
 		}
@@ -378,9 +377,10 @@ static void ikbd_resync(void) {
  ***************************************************************************/
 
 enum {
-	M_ROOT, M_BAR, M_ACTIVE, M_T_DESK, M_T_FILE, M_SCREEN,
+	M_ROOT, M_BAR, M_ACTIVE, M_T_DESK, M_T_FILE, M_T_VIEW, M_SCREEN,
 	M_DESKBOX, M_ABOUT, M_DESKSEP, M_ACC1, M_ACC2, M_ACC3, M_ACC4, M_ACC5, M_ACC6,
-	M_FILEBOX, M_OPEN, M_FILESEP, M_QUIT,
+	M_FILEBOX, M_OPEN, M_FILESEP1, M_SCREENSHOT, M_FILESEP2, M_QUIT,
+	M_VIEWBOX, M_INVERT,
 	M_COUNT
 };
 
@@ -392,14 +392,27 @@ static int menu_shown;
 extern void SDL_AtariGem_SetMessageHook(int (*hook)(const short *message))
 	__attribute__((weak));
 
+/* Control key shortcuts, also read from the IKBD hook */
+static const struct {
+	SDLKey key;
+	int item;
+} shortcuts[] = {
+	{ SDLK_o, M_OPEN },
+	{ SDLK_t, M_SCREENSHOT },
+	{ SDLK_q, M_QUIT },
+};
+
+#define DESK_W 21
+#define FILE_W 22
+#define VIEW_W 12
+
 static char s_t_desk[] = " sz81 ";
 static char s_t_file[] = " File ";
-static char s_about[] = "  About sz81...      ";
-static char s_desksep[] = "---------------------";
-static char s_acc[6][22];
-static char s_open[] = "  Open...     ^O ";
-static char s_filesep[] = "-----------------";
-static char s_quit[] = "  Quit        ^Q ";
+static char s_t_view[] = " View ";
+static char s_about[DESK_W + 1], s_desksep[DESK_W + 1], s_acc[6][DESK_W + 1];
+static char s_open[FILE_W + 1], s_screenshot[FILE_W + 1], s_quit[FILE_W + 1];
+static char s_filesep[FILE_W + 1];
+static char s_invert[VIEW_W + 1];
 
 static void menu_obj(int i, int next, int head, int tail, int type, int state,
 	long spec, int x, int y, int w, int h) {
@@ -416,8 +429,24 @@ static void menu_obj(int i, int next, int head, int tail, int type, int state,
 	menu[i].ob_height = h;
 }
 
-static void menu_str(int i, int next, char *s, int state, int y, int w) {
-	menu_obj(i, next, -1, -1, G_STRING, state, 0, 0, y, w, 1);
+/* A menu entry: two spaces for the check mark, the text, the shortcut at
+ * the right edge */
+static void menu_item(int i, int next, char *s, int w, int y, const char *text,
+	const char *key) {
+	sprintf(s, "  %-*s%s ", w - 3 - (int)strlen(key), text, key);
+	menu_obj(i, next, -1, -1, G_STRING, OS_NORMAL, 0, 0, y, w, 1);
+	menu[i].ob_spec.free_string = s;
+}
+
+static void menu_separator(int i, int next, char *s, int w, int y) {
+	memset(s, '-', w);
+	s[w] = 0;
+	menu_obj(i, next, -1, -1, G_STRING, OS_DISABLED, 0, 0, y, w, 1);
+	menu[i].ob_spec.free_string = s;
+}
+
+static void menu_title(int i, int next, char *s, int x) {
+	menu_obj(i, next, -1, -1, G_TITLE, OS_NORMAL, 0L, x, 0, strlen(s), 0x0301);
 	menu[i].ob_spec.free_string = s;
 }
 
@@ -425,30 +454,35 @@ static void menu_str(int i, int next, char *s, int state, int y, int w) {
  * byte extra pixels); rsrc_obfix turns them into pixels */
 static void menu_build(void) {
 	short x, y, w, h;
-	int i, deskw = sizeof(s_about) - 1, filew = sizeof(s_open) - 1;
+	char name[24];
+	int i;
 
 	menu_obj(M_ROOT, -1, M_BAR, M_SCREEN, G_IBOX, OS_NORMAL, 0L, 0, 0, 80, 25);
 	menu_obj(M_BAR, M_SCREEN, M_ACTIVE, M_ACTIVE, G_BOX, OS_NORMAL, 0x00001100L, 0, 0, 80, 0x0201);
-	menu_obj(M_ACTIVE, M_BAR, M_T_DESK, M_T_FILE, G_IBOX, OS_NORMAL, 0L, 2, 0, 12, 0x0301);
-	menu_obj(M_T_DESK, M_T_FILE, -1, -1, G_TITLE, OS_NORMAL, 0L, 0, 0, 6, 0x0301);
-	menu[M_T_DESK].ob_spec.free_string = s_t_desk;
-	menu_obj(M_T_FILE, M_ACTIVE, -1, -1, G_TITLE, OS_NORMAL, 0L, 6, 0, 6, 0x0301);
-	menu[M_T_FILE].ob_spec.free_string = s_t_file;
-	menu_obj(M_SCREEN, M_ROOT, M_DESKBOX, M_FILEBOX, G_IBOX, OS_NORMAL, 0L, 0, 0x0301, 80, 19);
+	menu_obj(M_ACTIVE, M_BAR, M_T_DESK, M_T_VIEW, G_IBOX, OS_NORMAL, 0L, 2, 0, 18, 0x0301);
+	menu_title(M_T_DESK, M_T_FILE, s_t_desk, 0);
+	menu_title(M_T_FILE, M_T_VIEW, s_t_file, 6);
+	menu_title(M_T_VIEW, M_ACTIVE, s_t_view, 12);
+	menu_obj(M_SCREEN, M_ROOT, M_DESKBOX, M_VIEWBOX, G_IBOX, OS_NORMAL, 0L, 0, 0x0301, 80, 19);
 
-	menu_obj(M_DESKBOX, M_FILEBOX, M_ABOUT, M_ACC6, G_BOX, OS_NORMAL, 0x00FF1100L, 2, 0, deskw, 8);
-	menu_str(M_ABOUT, M_DESKSEP, s_about, OS_NORMAL, 0, deskw);
-	menu_str(M_DESKSEP, M_ACC1, s_desksep, OS_DISABLED, 1, deskw);
+	menu_obj(M_DESKBOX, M_FILEBOX, M_ABOUT, M_ACC6, G_BOX, OS_NORMAL, 0x00FF1100L, 2, 0, DESK_W, 8);
+	menu_item(M_ABOUT, M_DESKSEP, s_about, DESK_W, 0, "About sz81...", "");
+	menu_separator(M_DESKSEP, M_ACC1, s_desksep, DESK_W, 1);
 	for (i = 0; i < 6; i++) {
-		sprintf(s_acc[i], "  Desk Accessory %d   ", i + 1);
-		menu_str(M_ACC1 + i, i < 5 ? M_ACC1 + i + 1 : M_DESKBOX, s_acc[i], OS_NORMAL, 2 + i, deskw);
+		sprintf(name, "Desk Accessory %d", i + 1);
+		menu_item(M_ACC1 + i, i < 5 ? M_ACC1 + i + 1 : M_DESKBOX, s_acc[i], DESK_W, 2 + i, name, "");
 	}
 
-	menu_obj(M_FILEBOX, M_SCREEN, M_OPEN, M_QUIT, G_BOX, OS_NORMAL, 0x00FF1100L, 8, 0, filew, 3);
-	menu_str(M_OPEN, M_FILESEP, s_open, OS_NORMAL, 0, filew);
-	menu_str(M_FILESEP, M_QUIT, s_filesep, OS_DISABLED, 1, filew);
-	menu_str(M_QUIT, M_FILEBOX, s_quit, OS_NORMAL, 2, filew);
-	menu[M_QUIT].ob_flags |= OF_LASTOB;
+	menu_obj(M_FILEBOX, M_VIEWBOX, M_OPEN, M_QUIT, G_BOX, OS_NORMAL, 0x00FF1100L, 8, 0, FILE_W, 5);
+	menu_item(M_OPEN, M_FILESEP1, s_open, FILE_W, 0, "Open...", "^O");
+	menu_separator(M_FILESEP1, M_SCREENSHOT, s_filesep, FILE_W, 1);
+	menu_item(M_SCREENSHOT, M_FILESEP2, s_screenshot, FILE_W, 2, "Save screenshot", "^T");
+	menu_separator(M_FILESEP2, M_QUIT, s_filesep, FILE_W, 3);
+	menu_item(M_QUIT, M_FILEBOX, s_quit, FILE_W, 4, "Quit", "^Q");
+
+	menu_obj(M_VIEWBOX, M_SCREEN, M_INVERT, M_INVERT, G_BOX, OS_NORMAL, 0x00FF1100L, 14, 0, VIEW_W, 1);
+	menu_item(M_INVERT, M_VIEWBOX, s_invert, VIEW_W, 0, "Invert", "");
+	menu[M_INVERT].ob_flags |= OF_LASTOB;
 
 	for (i = 0; i < M_COUNT; i++)
 		rsrc_obfix(menu, i);
@@ -475,8 +509,28 @@ static int menu_message(const short *message) {
 	return 0;
 }
 
-static void menu_shortcut(int sc) {
-	menu_pick = scan_sym[sc] == SDLK_o ? M_OPEN : M_QUIT;
+/* On exit: returns TRUE if Control and this key are a menu shortcut */
+static int menu_shortcut(int sc) {
+	int i;
+
+	for (i = 0; i < (int)(sizeof(shortcuts) / sizeof(*shortcuts)); i++) {
+		if (scan_sym[sc] == shortcuts[i].key) {
+			menu_pick = shortcuts[i].item;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+/* Keep the View menu's check marks in step with the settings, which
+ * sz81's own keys (F8) and dialogs change too */
+static void menu_update_checks(void) {
+	static int invert = -1;
+
+	if (menu_shown && invert != sdl_emulator.invert) {
+		invert = sdl_emulator.invert;
+		menu_icheck(menu, M_INVERT, invert ? 1 : 0);
+	}
 }
 
 static void menu_do(int item) {
@@ -490,11 +544,21 @@ static void menu_do(int item) {
 			/* As F3: the selector, then a reset and the load */
 			toggle_ldfile_state();
 			break;
+		case M_SCREENSHOT:
+			/* As PrtScn: a BMP in the local scnsht folder */
+			save_screenshot();
+			break;
 		case M_QUIT:
 			/* The desktop would take the Q of ^Q as a key of its own */
 			wait_keys_released();
 			flush_keys();
 			emulator_exit();
+			break;
+		case M_INVERT:
+			/* As F8 */
+			sdl_emulator.invert = !sdl_emulator.invert;
+			rcfile.rewrite = TRUE;
+			refresh_screen = 1;
 			break;
 	}
 }
@@ -523,6 +587,7 @@ void atari_poll(void) {
 	if (!state) return;
 
 	if (hook_active) ikbd_pump();
+	menu_update_checks();
 
 	if ((item = menu_pick) != 0) {
 		menu_pick = 0;
@@ -593,3 +658,4 @@ char *atari_file_request(const char *title) {
 
 	return fname;
 }
+
