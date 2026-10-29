@@ -95,7 +95,7 @@ int save_state_dialog_slots_populate(void) {
 		save_state_dialog.slots[count] = 0;
 
 	/* Build a path to the currently loaded program's save state folder */
-	#if defined(PLATFORM_GP2X) || defined(__amigaos4__) || defined(_WIN32)
+	#if defined(PLATFORM_GP2X) || defined(__amigaos4__) || defined(_WIN32) || defined(PLATFORM_ATARI)
 		strcpy(foldername, LOCAL_DATA_DIR);
 	#elif defined(PLATFORM_RISCOS)
 		strcpy(foldername, riscos_prog_dir);
@@ -299,7 +299,7 @@ int sdl_save_file(int parameter, int method) {
 		}
 	} else if (method == SAVE_FILE_METHOD_STATESAVE) {
 		/* Build a path to the currently loaded program's save state folder */
-		#if defined(PLATFORM_GP2X) || defined(__amigaos4__) || defined(_WIN32)
+		#if defined(PLATFORM_GP2X) || defined(__amigaos4__) || defined(_WIN32) || defined(PLATFORM_ATARI)
 			strcpy(fullpath, LOCAL_DATA_DIR);
 		#elif defined(PLATFORM_RISCOS)
 			strcpy(fullpath, riscos_prog_dir);
@@ -612,7 +612,7 @@ int sdl_load_file(int parameter, int method) {
 		}
 	} else if (method == LOAD_FILE_METHOD_STATELOAD) {
 		/* Build a path to the currently loaded program's save state folder */
-		#if defined(PLATFORM_GP2X) || defined(__amigaos4__) || defined(_WIN32)
+		#if defined(PLATFORM_GP2X) || defined(__amigaos4__) || defined(_WIN32) || defined(PLATFORM_ATARI)
 			strcpy(fullpath, LOCAL_DATA_DIR);
 		#elif defined(PLATFORM_RISCOS)
 			strcpy(fullpath, riscos_prog_dir);
