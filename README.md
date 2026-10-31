@@ -1,3 +1,23 @@
+# sz81 2.1.8 for Atari ST (and compatibles)
+
+![sz81 running in a GEM window on the Atari](sz81-atari-screenshot.png)
+
+This is an attempt to bring the sz81 ZX81 emulator to the Atari ST family of computers,
+including a more user-friendly native UI and fixes specific to the platform. sz81 has
+been previously ported before, but was missing the Chroma80 and Chroma81 extension, along
+with a couple of other features.
+
+This is still an SDL-based emulator and has higher system requirements than
+Christoph Zwerschke's excellent ZX81-Emulator. If you want to enjoy the Zeddy on an
+8 MHz Atari ST, use his emulator. This one is for the folks who run a multitasking
+operating system.
+
+This ports main goal is to offer everything from the sz81 ui also in a native fashion.
+Note that I don't intend to remove the sz81 ui (except the file selector), as I integrate
+a fullscreen mode later.
+
+AI disclosure: Coding tools helped in porting and testing this application.
+
 # sz81_2_1_8
 sz81 is an excellent zx81 emulator, which supports multiple OS. Currently it is at version 2.3.12. The latest version can be found [here](https://github.com/SegHaxx/sz81)
 
