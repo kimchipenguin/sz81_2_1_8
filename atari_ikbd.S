@@ -9,6 +9,9 @@
 | The block from ikbd_hook_start to ikbd_hook_end is copied into global
 | memory (it runs in interrupts while other processes are active), so all
 | references inside it are PC-relative.
+|
+| Only instructions and addressing modes that the 68000 and ColdFire share
+| are used, so the same source serves the FireBee build.
 
 	.text
 	.even
@@ -21,21 +24,27 @@ _ikbd_hook_start:
 _ikbd_hook_old:
 	.long	0
 _ikbd_hook_handler:
-	movem.l	%d1/%a1,-(%sp)
-	move.w	%d0,%d1
-	and.w	#0x7f,%d1
-	lea	_ikbd_hook_down(%pc),%a1
+	lea	-12(%sp),%sp
+	movem.l	%d1-%d2/%a1,(%sp)
+	moveq	#0x7f,%d1
+	and.l	%d0,%d1
+	moveq	#0,%d2
 	btst	#7,%d0
-	seq	(%a1,%d1.w)		| down[key] = $ff on press, 0 on release
 	bne.s	1f
+	moveq	#-1,%d2
+1:	lea	_ikbd_hook_down(%pc),%a1
+	move.b	%d2,(%a1,%d1.l)		| down[key] = $ff on press, 0 on release
+	tst.b	%d2
+	beq.s	2f
 	lea	_ikbd_hook_hit(%pc),%a1
-	st	(%a1,%d1.w)		| hit[key]: pressed since sz81 looked
-1:	movem.l	(%sp)+,%d1/%a1
+	move.b	%d2,(%a1,%d1.l)		| hit[key]: pressed since sz81 looked
+2:	movem.l	(%sp),%d1-%d2/%a1
+	lea	12(%sp),%sp
 	move.l	_ikbd_hook_old(%pc),-(%sp)	| chain: rts jumps to the old handler
 	tst.l	(%sp)
-	bne.s	2f
+	bne.s	3f
 	addq.l	#4,%sp			| no old handler: just return
-2:	rts
+3:	rts
 
 _ikbd_hook_down:
 	.space	128
@@ -55,11 +64,13 @@ _ikbd_hook_end:
 _ikbd_term_old:
 	.long	0
 _ikbd_term_stub:
-	movem.l	%d0-%d7/%a0-%a6,-(%sp)
+	lea	-60(%sp),%sp
+	movem.l	%d0-%d7/%a0-%a6,(%sp)
 	jsr	_ikbd_remove_super
-	movem.l	(%sp)+,%d0-%d7/%a0-%a6
+	movem.l	(%sp),%d0-%d7/%a0-%a6
+	lea	60(%sp),%sp
 	move.l	_ikbd_term_old,-(%sp)
 	tst.l	(%sp)
-	bne.s	3f
+	bne.s	4f
 	addq.l	#4,%sp
-3:	rts
+4:	rts

@@ -4,6 +4,7 @@
 #   make -f Makefile.atari                 plain 68000 (ST, STE, Mega STE)
 #   make -f Makefile.atari CPU=-m68020-60  68020-68060 with FPU (TT, Falcon)
 #                                          -> sz81_68020-60.app
+#   make -f Makefile.atari CPU=-mcpu=5475  FireBee (ColdFire) -> sz81_v4e.app
 #
 # By default the toolchain's SDL is used. SDL_PREFIX points to a directory
 # holding an SDL build per CPU instead (<SDL_PREFIX>/m68000, .../m68020-60),
@@ -26,14 +27,21 @@ PACKAGE_DATA_DIR?=data
 # Comment this out if you don't want sound support.
 SOUNDDEF=-DOSS_SOUND_SUPPORT
 
+# CPUDIR names the object and SDL directories
+ifeq ($(CPU),-mcpu=5475)
+CPUDIR=m5475
+TARGET=sz81_v4e.app
+else
+CPUDIR=$(patsubst -%,%,$(CPU))
 ifeq ($(CPU),-m68000)
 TARGET=sz81.app
 else
 TARGET=sz81$(subst -m,_,$(CPU)).app
 endif
+endif
 SOURCES=sdl_main.c common.c sound.c z80.c loadp.c sdl_engine.c sdl_hotspots.c \
 	sdl_input.c sdl_loadsave.c sdl_resources.c sdl_sound.c sdl_video.c atari.c
-OBJDIR=obj-atari$(subst -,_,$(CPU))
+OBJDIR=obj-atari_$(subst -,_,$(CPUDIR))
 OBJECTS=$(patsubst %.c, $(OBJDIR)/%.o, $(SOURCES)) $(OBJDIR)/atari_ikbd.o
 VERSION=$(shell cat VERSION)
 
@@ -45,7 +53,7 @@ LDFLAGS=$(CPU)
 LIBS=-lSDL -lgem -lz -lm
 
 ifneq ($(SDL_PREFIX),)
-SDL_DIR=$(SDL_PREFIX)/$(patsubst -%,%,$(CPU))
+SDL_DIR=$(SDL_PREFIX)/$(CPUDIR)
 # sz81 includes <SDL/SDL.h>, so the include directory itself goes first
 CFLAGS+=-I$(SDL_DIR)/include
 LIBS:=-L$(SDL_DIR)/lib $(LIBS)
@@ -66,7 +74,35 @@ $(OBJDIR)/%.o: %.S | $(OBJDIR)
 $(OBJDIR):
 	mkdir -p $@
 
-.PHONY: all clean
+# Release folder and zip: all three binaries, the data files sz81 needs and
+# the bundled ZX81 programs, every name 8.3 for TOS file systems
+#   make -f Makefile.atari SDL_PREFIX=atari/sdl-install dist
+DIST=dist/SZ81
+DATA_FILES=kbzx80.bmp kbzx81.bmp sz81.bmp sz81icon.bmp zx80.rom zx80font.bmp \
+	zx80kybd.bmp zx81.bmp zx81.rom zx81font.bmp zx81kybd.bmp zx82font.bmp
+ATARI_VERSION=$(shell sed -n 's/^\#define ATARI_VERSION "\(.*\)"/\1/p' atari.c)
+
+dist:
+	$(MAKE) -f Makefile.atari CPU=-m68000
+	$(MAKE) -f Makefile.atari CPU=-m68020-60
+	$(MAKE) -f Makefile.atari CPU=-mcpu=5475
+	rm -rf dist
+	mkdir -p $(DIST)/data $(DIST)/GAMES
+	cp sz81.app $(DIST)/SZ81.APP
+	cp sz81_68020-60.app $(DIST)/SZ81FPU.APP
+	cp sz81_v4e.app $(DIST)/SZ81V4E.APP
+	cp COPYING $(DIST)/COPYING
+	cd data && cp $(DATA_FILES) ../$(DIST)/data/
+	cp games-etc/aydemo.p games-etc/mine81.p games-etc/mine81.txt \
+		games-etc/tetris.p games-etc/tetris.txt games-etc/tetris1k.p \
+		games-etc/tetrishr.p $(DIST)/GAMES/
+	cp games-etc/pipepanic/pipepanic.p $(DIST)/GAMES/PIPEPANC.P
+	cp games-etc/pipepanic/pipepanic.txt $(DIST)/GAMES/PIPEPANC.TXT
+	cp games-etc/mctemplate/mctemplate.p $(DIST)/GAMES/MCTEMPL.P
+	cp games-etc/mctemplate/mctemplate.txt $(DIST)/GAMES/MCTEMPL.TXT
+	cd dist && zip -qrX sz81-atari-$(ATARI_VERSION).zip SZ81
+
+.PHONY: all clean dist
 
 clean:
-	rm -rf obj-atari* sz81*.app sz81*.tos
+	rm -rf obj-atari* sz81*.app sz81*.tos dist

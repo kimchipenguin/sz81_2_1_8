@@ -61,3 +61,4 @@ atari/sdl-build/
 atari/sdl-install/
 atari/usound/
 local/
+dist/

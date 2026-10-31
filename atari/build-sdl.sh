@@ -3,10 +3,11 @@
 # toolchain: static libraries, one per CPU, installed under
 # atari/sdl-install/<cpu> (sdl-config and pkg-config files included).
 #
-# usage: atari/build-sdl.sh [cpu ...]     default: m68000 m68020-60
+# usage: atari/build-sdl.sh [cpu ...]     default: m68000 m68020-60 m5475
 #
 # then:  make -f Makefile.atari SDL_PREFIX=atari/sdl-install
 #        make -f Makefile.atari SDL_PREFIX=atari/sdl-install CPU=-m68020-60
+#        make -f Makefile.atari SDL_PREFIX=atari/sdl-install CPU=-mcpu=5475
 #
 # The source is atari/SDL-1.2; when missing, upstream SDL-1.2 is cloned at
 # the commit sz81 was tested with (set SDL_COMMIT to use another one). Its
@@ -32,7 +33,7 @@ commit=${SDL_COMMIT:-81490298a02fe6806c05ac7b5afde7d88fcc7bf9}
 usound=$here/usound
 usound_repo=https://github.com/mikrosk/usound.git
 usound_commit=${USOUND_COMMIT:-abd8e213d16d50e492faf2e05ecdae099a500d0a}
-cpus=("$@"); (( $#cpus )) || cpus=(m68000 m68020-60)
+cpus=("$@"); (( $#cpus )) || cpus=(m68000 m68020-60 m5475)
 
 if [[ ! -d $src ]]; then
 	git clone $repo $src
@@ -58,7 +59,11 @@ for cpu in $cpus; do
 	prefix=$here/sdl-install/$cpu
 	mkdir -p $build
 	cd $build
-	CFLAGS="-$cpu -O2 -fomit-frame-pointer" CPPFLAGS="-I$usound" \
+	case $cpu in
+		m5475) flag=-mcpu=5475 ;;	# FireBee (ColdFire V4e)
+		*) flag=-$cpu ;;
+	esac
+	CFLAGS="$flag -O2 -fomit-frame-pointer" CPPFLAGS="-I$usound" \
 	$src/configure --host=m68k-atari-mint --prefix=$prefix \
 		--disable-shared --enable-static \
 		--disable-threads --disable-pthreads --disable-pth \

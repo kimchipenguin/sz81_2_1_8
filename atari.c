@@ -115,6 +115,25 @@ static long super_tos_version(void) {
 static void flush_caches(void) {
 	/* The handler was copied as data: write it back from the data cache
 	 * and drop stale instructions (68040 copyback cache in ARAnyM) */
+#ifdef __mcoldfire__
+	/* ColdFire V4e: push every line of the 4 ways x 512 sets */
+	__asm__ volatile (
+		"nop\n\t"
+		"moveq #0,%%d0\n\t"
+		"moveq #0,%%d1\n\t"
+		"move.l %%d0,%%a0\n"
+		"1:\tcpushl %%bc,(%%a0)\n\t"
+		"lea 0x10(%%a0),%%a0\n\t"
+		"addq.l #1,%%d1\n\t"
+		"cmpi.w #512,%%d1\n\t"
+		"bne.s 1b\n\t"
+		"clr.l %%d1\n\t"
+		"addq.l #1,%%d0\n\t"
+		"move.l %%d0,%%a0\n\t"
+		"cmpi.w #4,%%d0\n\t"
+		"bne.s 1b\n\t"
+		"nop" ::: "d0", "d1", "a0", "memory");
+#else
 	if (cpu >= 40)
 		__asm__ volatile (".word 0xf4f8" ::: "memory");	/* cpusha bc */
 	else if (cpu >= 20)
@@ -123,6 +142,7 @@ static void flush_caches(void) {
 		__asm__ volatile (".word 0x4e7a,0x0002\n\t"
 			"or.w #0x0808,%%d0\n\t"
 			".word 0x4e7b,0x0002" ::: "d0", "memory");
+#endif
 }
 
 static long super_install(void) {

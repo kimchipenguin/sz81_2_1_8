@@ -29,6 +29,8 @@
 #endif
 #if defined(_WIN32)
 	#define RESOURCE_FILE "sz81.ini"
+#elif defined(PLATFORM_ATARI)
+	#define RESOURCE_FILE "sz81rc"		/* TOS file names are 8.3 */
 #else
 	#define RESOURCE_FILE "sz81rc_218"	// To allow multiple instances
 #endif
@@ -48,7 +50,11 @@
 #define IMG_ZX80_FONT "zx80font.bmp"
 #define IMG_ZX81_FONT "zx81font.bmp"
 #define IMG_ZX82_FONT "zx82font.bmp"
+#ifdef PLATFORM_ATARI
+#define IMG_SZ81_ICONS "sz81icon.bmp"	/* 8.3 */
+#else
 #define IMG_SZ81_ICONS "sz81icons.bmp"
+#endif
 
 #define ROM_ZX80 "zx80.rom"
 #define ROM_ZX81 "zx81.rom"
