@@ -1,13 +1,14 @@
 diff --git a/src/video/gem/SDL_gemevents.c b/src/video/gem/SDL_gemevents.c
-index 7ba7995..6a3c8fd 100644
+index 7ba79954..4560cc75 100644
 --- a/src/video/gem/SDL_gemevents.c
 +++ b/src/video/gem/SDL_gemevents.c
-@@ -184,6 +184,16 @@ void GEM_PumpEvents(_THIS)
+@@ -184,11 +184,25 @@ void GEM_PumpEvents(_THIS)
  	}
  }
  
-+/* Local addition (not upstream): messages the driver does not handle, such
-+   as menu selections, are passed on to the application */
++/* Local addition (not upstream): the application sees every message first,
++   so it can handle menu selections and its own windows. A non-zero return
++   means the message was handled and the driver ignores it */
 +
 +static int (*GEM_message_hook)(const short *message);
 +
@@ -19,15 +20,11 @@ index 7ba7995..6a3c8fd 100644
  static int do_messages(_THIS, short *message, short latest_msg_id)
  {
  	int quit, update_work_area, sdl_resize;
-@@ -292,6 +302,11 @@ static int do_messages(_THIS, short *message, short latest_msg_id)
- 			VDI_setpalette(this, VDI_oldpalette);
- 			SDL_Atari_RestoreConsoleSettings();
- 			break;
-+		default:
-+			if (GEM_message_hook) {
-+				GEM_message_hook(message);
-+			}
-+			break;
- 	}
  
- 	if (update_work_area) {
+ 	quit = update_work_area = sdl_resize = 0;
++	if (GEM_message_hook && GEM_message_hook(message)) {
++		return 0;
++	}
+ 	switch (message[0]) {
+ 		case MSG_SDL_ID:
+ 			quit=(message[1] == latest_msg_id);

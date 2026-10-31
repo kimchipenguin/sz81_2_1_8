@@ -14,8 +14,9 @@
  * driver can only guess when a key goes up. A handler in the TOS keyboard
  * vector (atari_ikbd.S) sees every press and release instead; sz81's key
  * events are made from that while SDL's own are filtered out. The menu bar
- * needs our SDL build, whose GEM driver passes on the messages it does not
- * handle itself (SDL_AtariGem_SetMessageHook).
+ * needs our SDL build, whose GEM driver shows us every AES message first
+ * (SDL_AtariGem_SetMessageHook), so we also get the messages of our own
+ * windows, such as the keyboard window (View > Keyboard).
  */
 
 #include <stdio.h>
@@ -314,6 +315,7 @@ static void push_key(int sc, int pressed) {
 static int menu_pick;	/* menu item waiting to be acted on, 0 if none */
 
 static int menu_shortcut(int sc);
+static int kb_is_top(void);
 
 /* Turn the key changes since the last pump into SDL key events: modifier
  * presses first, so Shift+P reaches the ZX81 as Shift+P, and modifier
@@ -323,7 +325,8 @@ static void ikbd_pump(void) {
 	unsigned char now[128], hit[128];
 	int sc, focus;
 
-	focus = (SDL_GetAppState() & SDL_APPINPUTFOCUS) != 0;
+	/* The emulator keeps the keys while its keyboard window is on top */
+	focus = (SDL_GetAppState() & SDL_APPINPUTFOCUS) != 0 || kb_is_top();
 	for (sc = 0; sc < 128; sc++) {
 		now[sc] = kdown[sc] ? 1 : 0;
 		hit[sc] = khit[sc] ? 1 : 0;
@@ -375,6 +378,337 @@ static void ikbd_resync(void) {
 }
 
 /***************************************************************************
+ * Keyboard window                                                         *
+ ***************************************************************************/
+/* Shows the keyboard of the current machine. The pictures are EightyOne's
+ * (data/kbzx80.bmp, kbzx81.bmp, 8-bit BMPs). Each colour becomes a one-plane
+ * mask drawn with vrt_cpyfm in its own pen over a black fill, which works in
+ * every screen depth. With more than 256 colours every colour of the picture
+ * gets its own pen; with a palette the pens are the standard VDI colours, so
+ * other applications' colours stay as they are. In monochrome the keys are
+ * white on black: a label is white on the background and black on a key,
+ * which a scan along each row tells apart. */
+
+#define KB_MAX_PENS 64
+
+static const struct {
+	Uint8 r, g, b;
+	short pen;
+} kb_base[] = {
+	{   0,   0,   0, G_BLACK },
+	{ 255, 255, 255, G_WHITE },
+	{ 252,   0,   0, G_RED },
+	{  72,  42, 254, G_BLUE },
+	{ 255, 201,  33, G_YELLOW },
+};
+#define KB_NBASE ((int)(sizeof(kb_base) / sizeof(*kb_base)))
+
+static short kb_handle = -1;	/* window handle, -1 = closed */
+static short kb_vdi;			/* our virtual workstation, 0 = not open */
+static int kb_planes;
+static int kb_machine = -1;		/* zx80 when the picture was loaded */
+static int kb_w, kb_h, kb_words;
+static int kb_npens;
+static short kb_pen[KB_MAX_PENS];
+static unsigned short *kb_mask[KB_MAX_PENS];
+static char kb_title[24];
+static GRECT kb_pos;			/* where the window was when closed */
+static int kb_pos_set;
+
+static void kb_free(void) {
+	int i;
+
+	for (i = 0; i < kb_npens; i++) free(kb_mask[i]);
+	kb_npens = 0;
+	kb_machine = -1;
+}
+
+static int kb_nearest_base(const SDL_Color *c) {
+	long best = 0x7fffffffL, d;
+	int i, found = 0;
+
+	for (i = 0; i < KB_NBASE; i++) {
+		d = (long)(c->r - kb_base[i].r) * (c->r - kb_base[i].r)
+			+ (long)(c->g - kb_base[i].g) * (c->g - kb_base[i].g)
+			+ (long)(c->b - kb_base[i].b) * (c->b - kb_base[i].b);
+		if (d < best) {
+			best = d;
+			found = i;
+		}
+	}
+	return found;
+}
+
+/* On exit: returns TRUE if the current machine's picture is loaded */
+static int kb_load(void) {
+	char filename[256];
+	SDL_Surface *bmp;
+	SDL_Palette *pal;
+	short slot[256], base_of[256], rgb[3];
+	long used[256], face_count[KB_NBASE];
+	int i, x, y, s, face, base, pen, on_key;
+	Uint8 *row;
+
+	if (kb_machine == zx80) return TRUE;
+	kb_free();
+
+	strcpy(filename, PACKAGE_DATA_DIR);
+	strcatdelimiter(filename);
+	strcat(filename, zx80 ? "kbzx80.bmp" : "kbzx81.bmp");
+	if ((bmp = SDL_LoadBMP(filename)) == NULL) return FALSE;
+	pal = bmp->format->palette;
+	if (bmp->format->BitsPerPixel != 8 || pal == NULL) {
+		SDL_FreeSurface(bmp);
+		return FALSE;
+	}
+	kb_w = bmp->w;
+	kb_h = bmp->h;
+	kb_words = (kb_w + 15) / 16;
+
+	SDL_LockSurface(bmp);
+	memset(used, 0, sizeof(used));
+	for (y = 0; y < kb_h; y++) {
+		row = (Uint8 *)bmp->pixels + y * bmp->pitch;
+		for (x = 0; x < kb_w; x++) used[row[x]]++;
+	}
+
+	/* The key face colour is the most used one after black */
+	memset(face_count, 0, sizeof(face_count));
+	for (i = 0; i < 256 && i < pal->ncolors; i++)
+		face_count[kb_nearest_base(&pal->colors[i])] += used[i];
+	face = 1;
+	for (i = 1; i < KB_NBASE; i++)
+		if (face_count[i] > face_count[face]) face = i;
+
+	/* Give every used colour a mask; black is the background fill */
+	for (i = 0; i < 256; i++) {
+		slot[i] = -1;
+		if (!used[i] || i >= pal->ncolors) continue;
+		base = base_of[i] = kb_nearest_base(&pal->colors[i]);
+		if (kb_planes > 8) {
+			if (!pal->colors[i].r && !pal->colors[i].g && !pal->colors[i].b) continue;
+			pen = 16 + kb_npens;
+		} else if (kb_planes == 1) {
+			if (base == 0) continue;
+			pen = G_WHITE;
+		} else {
+			if (base == 0) continue;
+			pen = kb_base[base].pen;
+		}
+		for (s = 0; s < kb_npens && kb_pen[s] != pen; s++)
+			;
+		if (s == kb_npens) {
+			if (s == KB_MAX_PENS) continue;
+			kb_mask[s] = calloc(kb_words * 2L, kb_h);
+			if (kb_mask[s] == NULL) break;
+			kb_pen[s] = pen;
+			kb_npens++;
+			if (kb_planes > 8) {
+				rgb[0] = pal->colors[i].r * 1000L / 255;
+				rgb[1] = pal->colors[i].g * 1000L / 255;
+				rgb[2] = pal->colors[i].b * 1000L / 255;
+				vs_color(kb_vdi, pen, rgb);
+			}
+		}
+		slot[i] = s;
+	}
+
+	for (y = 0; y < kb_h; y++) {
+		row = (Uint8 *)bmp->pixels + y * bmp->pitch;
+		on_key = FALSE;
+		for (x = 0; x < kb_w; x++) {
+			if ((s = slot[row[x]]) < 0) {
+				on_key = FALSE;
+				continue;
+			}
+			if (kb_planes == 1) {
+				if (base_of[row[x]] == face) on_key = TRUE;
+				else if (on_key) continue;
+			}
+			kb_mask[s][y * kb_words + (x >> 4)] |= 0x8000 >> (x & 15);
+		}
+	}
+	SDL_UnlockSurface(bmp);
+	SDL_FreeSurface(bmp);
+
+	kb_machine = zx80;
+	sprintf(kb_title, " ZX8%d Keyboard ", zx80 ? 0 : 1);
+	return TRUE;
+}
+
+static void kb_draw(const GRECT *area) {
+	GRECT work, r;
+	MFDB src, dst;
+	short pxy[8], col[2];
+	int s;
+
+	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
+	memset(&dst, 0, sizeof(dst));
+	src.fd_w = kb_words * 16;
+	src.fd_h = kb_h;
+	src.fd_wdwidth = kb_words;
+	src.fd_stand = 0;
+	src.fd_nplanes = 1;
+	src.fd_r1 = src.fd_r2 = src.fd_r3 = 0;
+
+	wind_update(BEG_UPDATE);
+	graf_mouse(M_OFF, NULL);
+	wind_get_grect(kb_handle, WF_FIRSTXYWH, &r);
+	while (r.g_w > 0 && r.g_h > 0) {
+		if (rc_intersect(area, &r) && rc_intersect(&work, &r)) {
+			pxy[0] = r.g_x;
+			pxy[1] = r.g_y;
+			pxy[2] = r.g_x + r.g_w - 1;
+			pxy[3] = r.g_y + r.g_h - 1;
+			vs_clip(kb_vdi, 1, pxy);
+			vswr_mode(kb_vdi, MD_REPLACE);
+			vsf_interior(kb_vdi, FIS_SOLID);
+			vsf_color(kb_vdi, G_BLACK);
+			vr_recfl(kb_vdi, pxy);
+
+			/* Source: the same rectangle in the picture */
+			pxy[4] = pxy[0];
+			pxy[5] = pxy[1];
+			pxy[6] = pxy[2];
+			pxy[7] = pxy[3];
+			pxy[0] -= work.g_x;
+			pxy[1] -= work.g_y;
+			pxy[2] -= work.g_x;
+			pxy[3] -= work.g_y;
+			if (pxy[2] >= kb_w) {
+				pxy[6] -= pxy[2] - (kb_w - 1);
+				pxy[2] = kb_w - 1;
+			}
+			if (pxy[3] >= kb_h) {
+				pxy[7] -= pxy[3] - (kb_h - 1);
+				pxy[3] = kb_h - 1;
+			}
+			col[1] = G_WHITE;
+			for (s = 0; s < kb_npens && pxy[0] <= pxy[2] && pxy[1] <= pxy[3]; s++) {
+				src.fd_addr = kb_mask[s];
+				col[0] = kb_pen[s];
+				vrt_cpyfm(kb_vdi, MD_TRANS, pxy, &src, &dst, col);
+			}
+		}
+		wind_get_grect(kb_handle, WF_NEXTXYWH, &r);
+	}
+	vs_clip(kb_vdi, 0, pxy);
+	graf_mouse(M_ON, NULL);
+	wind_update(END_UPDATE);
+}
+
+static void kb_close(void) {
+	if (kb_handle < 0) return;
+	wind_get_grect(kb_handle, WF_CURRXYWH, &kb_pos);
+	kb_pos_set = TRUE;
+	wind_close(kb_handle);
+	wind_delete(kb_handle);
+	kb_handle = -1;
+}
+
+static void kb_exit(void) {
+	kb_close();
+	kb_free();
+	if (kb_vdi) v_clsvwk(kb_vdi);
+	kb_vdi = 0;
+}
+
+static void kb_open(void) {
+	short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 }, work_out[57], dummy;
+	GRECT desk, outer;
+
+	if (kb_handle >= 0) {
+		wind_set(kb_handle, WF_TOP, 0, 0, 0, 0);
+		return;
+	}
+	if (!kb_vdi) {
+		kb_vdi = graf_handle(&dummy, &dummy, &dummy, &dummy);
+		v_opnvwk(work_in, &kb_vdi, work_out);
+		if (!kb_vdi) {
+			form_alert(1, "[3][Cannot open a VDI workstation|for the keyboard window.][  OK  ]");
+			return;
+		}
+		vq_extnd(kb_vdi, 1, work_out);
+		kb_planes = work_out[4];
+		atexit(kb_exit);
+	}
+	if (!kb_load()) {
+		form_alert(1, "[3][Cannot load the keyboard picture|" PACKAGE_DATA_DIR
+			"\\kbzx80.bmp or kbzx81.bmp.][  OK  ]");
+		return;
+	}
+
+	wind_get_grect(0, WF_WORKXYWH, &desk);
+	if ((kb_handle = wind_create_grect(NAME | CLOSER | MOVER, &desk)) < 0) {
+		form_alert(1, "[3][No more windows available.][  OK  ]");
+		return;
+	}
+	wind_set_str(kb_handle, WF_NAME, kb_title);
+	if (kb_pos_set) {
+		outer = kb_pos;
+	} else {
+		/* Centred at the bottom of the desktop */
+		outer.g_x = outer.g_y = 0;
+		outer.g_w = kb_w;
+		outer.g_h = kb_h;
+		wind_calc_grect(WC_BORDER, NAME | CLOSER | MOVER, &outer, &outer);
+		outer.g_x = desk.g_x + (desk.g_w - outer.g_w) / 2;
+		outer.g_y = desk.g_y + desk.g_h - outer.g_h;
+		if (outer.g_x < desk.g_x) outer.g_x = desk.g_x;
+		if (outer.g_y < desk.g_y) outer.g_y = desk.g_y;
+	}
+	wind_open_grect(kb_handle, &outer);
+}
+
+/* Machine changed (ZX80 <-> ZX81): show the other keyboard */
+static void kb_check_machine(void) {
+	GRECT work;
+
+	if (kb_handle < 0 || kb_machine == zx80) return;
+	if (!kb_load()) {
+		kb_close();
+		return;
+	}
+	wind_set_str(kb_handle, WF_NAME, kb_title);
+	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
+	kb_draw(&work);
+}
+
+static int kb_is_top(void) {
+	short top, dummy;
+
+	if (kb_handle < 0) return FALSE;
+	wind_get(0, WF_TOP, &top, &dummy, &dummy, &dummy);
+	return top == kb_handle;
+}
+
+/* On exit: returns TRUE if the message was for the keyboard window */
+static int kb_message(const short *message) {
+	if (kb_handle < 0 || message[0] < WM_REDRAW || message[0] > WM_TOOLBAR
+		|| message[3] != kb_handle)
+		return FALSE;
+
+	switch (message[0]) {
+		case WM_REDRAW:
+			kb_draw((const GRECT *)&message[4]);
+			break;
+		case WM_TOPPED:
+			wind_set(kb_handle, WF_TOP, 0, 0, 0, 0);
+			break;
+		case WM_BOTTOMED:
+			wind_set(kb_handle, WF_BOTTOM, 0, 0, 0, 0);
+			break;
+		case WM_MOVED:
+			wind_set_grect(kb_handle, WF_CURRXYWH, (const GRECT *)&message[4]);
+			break;
+		case WM_CLOSED:
+			kb_close();
+			break;
+	}
+	return TRUE;
+}
+
+/***************************************************************************
  * Menu bar                                                                *
  ***************************************************************************/
 
@@ -382,7 +716,7 @@ enum {
 	M_ROOT, M_BAR, M_ACTIVE, M_T_DESK, M_T_FILE, M_T_VIEW, M_SCREEN,
 	M_DESKBOX, M_ABOUT, M_DESKSEP, M_ACC1, M_ACC2, M_ACC3, M_ACC4, M_ACC5, M_ACC6,
 	M_FILEBOX, M_OPEN, M_FILESEP1, M_SCREENSHOT, M_FILESEP2, M_QUIT,
-	M_VIEWBOX, M_INVERT,
+	M_VIEWBOX, M_INVERT, M_KEYBOARD,
 	M_COUNT
 };
 
@@ -402,11 +736,12 @@ static const struct {
 	{ SDLK_o, M_OPEN },
 	{ SDLK_t, M_SCREENSHOT },
 	{ SDLK_q, M_QUIT },
+	{ SDLK_k, M_KEYBOARD },
 };
 
 #define DESK_W 21
 #define FILE_W 22
-#define VIEW_W 12
+#define VIEW_W 16
 
 static char s_t_desk[] = " sz81 ";
 static char s_t_file[] = " File ";
@@ -414,7 +749,7 @@ static char s_t_view[] = " View ";
 static char s_about[DESK_W + 1], s_desksep[DESK_W + 1], s_acc[6][DESK_W + 1];
 static char s_open[FILE_W + 1], s_screenshot[FILE_W + 1], s_quit[FILE_W + 1];
 static char s_filesep[FILE_W + 1];
-static char s_invert[VIEW_W + 1];
+static char s_invert[VIEW_W + 1], s_keyboard[VIEW_W + 1];
 
 static void menu_obj(int i, int next, int head, int tail, int type, int state,
 	long spec, int x, int y, int w, int h) {
@@ -482,9 +817,10 @@ static void menu_build(void) {
 	menu_separator(M_FILESEP2, M_QUIT, s_filesep, FILE_W, 3);
 	menu_item(M_QUIT, M_FILEBOX, s_quit, FILE_W, 4, "Quit", "^Q");
 
-	menu_obj(M_VIEWBOX, M_SCREEN, M_INVERT, M_INVERT, G_BOX, OS_NORMAL, 0x00FF1100L, 14, 0, VIEW_W, 1);
-	menu_item(M_INVERT, M_VIEWBOX, s_invert, VIEW_W, 0, "Invert", "");
-	menu[M_INVERT].ob_flags |= OF_LASTOB;
+	menu_obj(M_VIEWBOX, M_SCREEN, M_INVERT, M_KEYBOARD, G_BOX, OS_NORMAL, 0x00FF1100L, 14, 0, VIEW_W, 2);
+	menu_item(M_INVERT, M_KEYBOARD, s_invert, VIEW_W, 0, "Invert", "");
+	menu_item(M_KEYBOARD, M_VIEWBOX, s_keyboard, VIEW_W, 1, "Keyboard", "^K");
+	menu[M_KEYBOARD].ob_flags |= OF_LASTOB;
 
 	for (i = 0; i < M_COUNT; i++)
 		rsrc_obfix(menu, i);
@@ -501,14 +837,16 @@ static void menu_hide(void) {
 	}
 }
 
-/* Called by SDL's GEM driver from inside its event pump: only note the
- * choice here, it is carried out from check_events */
-static int menu_message(const short *message) {
+/* Called by SDL's GEM driver from inside its event pump for every message.
+ * A menu choice is only noted here, it is carried out from check_events.
+ * On exit: returns TRUE if the message is ours, SDL then ignores it */
+static int gem_message(const short *message) {
 	if (message[0] == MN_SELECTED) {
 		menu_pick = message[4];
 		menu_tnormal(menu, message[3], 1);
+		return TRUE;
 	}
-	return 0;
+	return kb_message(message);
 }
 
 /* On exit: returns TRUE if Control and this key are a menu shortcut */
@@ -527,11 +865,16 @@ static int menu_shortcut(int sc) {
 /* Keep the View menu's check marks in step with the settings, which
  * sz81's own keys (F8) and dialogs change too */
 static void menu_update_checks(void) {
-	static int invert = -1;
+	static int invert = -1, keyboard = -1;
 
-	if (menu_shown && invert != sdl_emulator.invert) {
+	if (!menu_shown) return;
+	if (invert != sdl_emulator.invert) {
 		invert = sdl_emulator.invert;
 		menu_icheck(menu, M_INVERT, invert ? 1 : 0);
+	}
+	if (keyboard != (kb_handle >= 0)) {
+		keyboard = kb_handle >= 0;
+		menu_icheck(menu, M_KEYBOARD, keyboard);
 	}
 }
 
@@ -562,6 +905,11 @@ static void menu_do(int item) {
 			rcfile.rewrite = TRUE;
 			refresh_screen = 1;
 			break;
+		case M_KEYBOARD:
+			if (kb_handle >= 0) kb_close();
+			else kb_open();
+			ikbd_resync();
+			break;
 	}
 }
 
@@ -581,7 +929,7 @@ void atari_poll(void) {
 				menu_shown = TRUE;
 				atexit(menu_hide);
 			}
-			SDL_AtariGem_SetMessageHook(menu_message);
+			SDL_AtariGem_SetMessageHook(gem_message);
 		}
 		if (state && ikbd_install())
 			SDL_SetEventFilter(drop_sdl_keys);
@@ -589,6 +937,7 @@ void atari_poll(void) {
 	if (!state) return;
 
 	if (hook_active) ikbd_pump();
+	kb_check_machine();
 	menu_update_checks();
 
 	if ((item = menu_pick) != 0) {
