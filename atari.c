@@ -16,7 +16,7 @@
  * events are made from that while SDL's own are filtered out. The menu bar
  * needs our SDL build, whose GEM driver shows us every AES message first
  * (SDL_AtariGem_SetMessageHook), so we also get the messages of our own
- * windows, such as the keyboard window (View > Keyboard).
+ * windows: the keyboard window (View > Keyboard) and the About window.
  */
 
 #include <stdio.h>
@@ -32,6 +32,9 @@
 #include <zlib.h>
 #include "sdl_engine.h"
 #include "atari.h"
+
+/* Version of the Atari port, shown in the About window */
+#define ATARI_VERSION "0.8"
 
 char *atari_file_request_retval = NULL;
 
@@ -88,6 +91,9 @@ long ikbd_remove_super(void);
 #define SC_RSHIFT 0x36
 #define SC_ALT    0x38
 #define SC_CAPS   0x3a
+#define SC_ESC    0x01
+#define SC_RETURN 0x1c
+#define SC_ENTER  0x72
 
 static char *hook_mem;			/* copy of the handler block */
 static volatile unsigned char *kdown, *khit;
@@ -315,7 +321,9 @@ static void push_key(int sc, int pressed) {
 static int menu_pick;	/* menu item waiting to be acted on, 0 if none */
 
 static int menu_shortcut(int sc);
-static int kb_is_top(void);
+static short our_top_window(void);
+static short kb_handle, ab_handle;
+static int ab_close_pending;
 
 /* Turn the key changes since the last pump into SDL key events: modifier
  * presses first, so Shift+P reaches the ZX81 as Shift+P, and modifier
@@ -324,9 +332,18 @@ static int kb_is_top(void);
 static void ikbd_pump(void) {
 	unsigned char now[128], hit[128];
 	int sc, focus;
+	short top;
 
-	/* The emulator keeps the keys while its keyboard window is on top */
-	focus = (SDL_GetAppState() & SDL_APPINPUTFOCUS) != 0 || kb_is_top();
+	/* The emulator keeps the keys while its keyboard window is on top. The
+	 * About window takes them: Return, Enter and Escape close it */
+	top = our_top_window();
+	if (top >= 0 && top == ab_handle) {
+		if (khit[SC_RETURN] || khit[SC_ENTER] || khit[SC_ESC]) ab_close_pending = TRUE;
+		focus = FALSE;
+	} else {
+		focus = (SDL_GetAppState() & SDL_APPINPUTFOCUS) != 0
+			|| (top >= 0 && top == kb_handle);
+	}
 	for (sc = 0; sc < 128; sc++) {
 		now[sc] = kdown[sc] ? 1 : 0;
 		hit[sc] = khit[sc] ? 1 : 0;
@@ -404,9 +421,15 @@ static const struct {
 #define KB_NBASE ((int)(sizeof(kb_base) / sizeof(*kb_base)))
 
 static short kb_handle = -1;	/* window handle, -1 = closed */
-static short kb_vdi;			/* our virtual workstation, 0 = not open */
-static int kb_planes;
-static int kb_machine = -1;		/* zx80 when the picture was loaded */
+static short vdi_handle;				/* our virtual workstation, 0 = not open */
+static int vdi_planes;
+static int kb_machine = -1;		/* KB_ZX80/KB_ZX81 of the loaded picture */
+
+/* Only the ZX80 with its original 4K ROM has the ZX80 keyboard; the 8K ROM
+ * upgrade came with the ZX81 layout */
+#define KB_ZX81 0
+#define KB_ZX80 1
+#define KB_PICTURE() (zx80 == 1 ? KB_ZX80 : KB_ZX81)
 static int kb_w, kb_h, kb_words;
 static int kb_npens;
 static short kb_pen[KB_MAX_PENS];
@@ -449,12 +472,12 @@ static int kb_load(void) {
 	int i, x, y, s, face, base, pen, on_key;
 	Uint8 *row;
 
-	if (kb_machine == zx80) return TRUE;
+	if (kb_machine == KB_PICTURE()) return TRUE;
 	kb_free();
 
 	strcpy(filename, PACKAGE_DATA_DIR);
 	strcatdelimiter(filename);
-	strcat(filename, zx80 ? "kbzx80.bmp" : "kbzx81.bmp");
+	strcat(filename, KB_PICTURE() == KB_ZX80 ? "kbzx80.bmp" : "kbzx81.bmp");
 	if ((bmp = SDL_LoadBMP(filename)) == NULL) return FALSE;
 	pal = bmp->format->palette;
 	if (bmp->format->BitsPerPixel != 8 || pal == NULL) {
@@ -485,10 +508,10 @@ static int kb_load(void) {
 		slot[i] = -1;
 		if (!used[i] || i >= pal->ncolors) continue;
 		base = base_of[i] = kb_nearest_base(&pal->colors[i]);
-		if (kb_planes > 8) {
+		if (vdi_planes > 8) {
 			if (!pal->colors[i].r && !pal->colors[i].g && !pal->colors[i].b) continue;
 			pen = 16 + kb_npens;
-		} else if (kb_planes == 1) {
+		} else if (vdi_planes == 1) {
 			if (base == 0) continue;
 			pen = G_WHITE;
 		} else {
@@ -503,11 +526,11 @@ static int kb_load(void) {
 			if (kb_mask[s] == NULL) break;
 			kb_pen[s] = pen;
 			kb_npens++;
-			if (kb_planes > 8) {
+			if (vdi_planes > 8) {
 				rgb[0] = pal->colors[i].r * 1000L / 255;
 				rgb[1] = pal->colors[i].g * 1000L / 255;
 				rgb[2] = pal->colors[i].b * 1000L / 255;
-				vs_color(kb_vdi, pen, rgb);
+				vs_color(vdi_handle, pen, rgb);
 			}
 		}
 		slot[i] = s;
@@ -521,7 +544,7 @@ static int kb_load(void) {
 				on_key = FALSE;
 				continue;
 			}
-			if (kb_planes == 1) {
+			if (vdi_planes == 1) {
 				if (base_of[row[x]] == face) on_key = TRUE;
 				else if (on_key) continue;
 			}
@@ -531,25 +554,61 @@ static int kb_load(void) {
 	SDL_UnlockSurface(bmp);
 	SDL_FreeSurface(bmp);
 
-	kb_machine = zx80;
-	sprintf(kb_title, " ZX8%d Keyboard ", zx80 ? 0 : 1);
+	kb_machine = KB_PICTURE();
+	sprintf(kb_title, " ZX8%d Keyboard ", kb_machine == KB_ZX80 ? 0 : 1);
 	return TRUE;
 }
 
-static void kb_draw(const GRECT *area) {
-	GRECT work, r;
+/* Draw a picture made of masks with its top left corner at x, y; r is the
+ * screen rectangle to draw, the clipping is already set to it */
+static void masks_draw(unsigned short *const *mask, const short *pen, int n,
+	int w, int h, int words, int x, int y, const GRECT *r) {
 	MFDB src, dst;
 	short pxy[8], col[2];
 	int s;
 
-	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
 	memset(&dst, 0, sizeof(dst));
-	src.fd_w = kb_words * 16;
-	src.fd_h = kb_h;
-	src.fd_wdwidth = kb_words;
+	src.fd_w = words * 16;
+	src.fd_h = h;
+	src.fd_wdwidth = words;
 	src.fd_stand = 0;
 	src.fd_nplanes = 1;
 	src.fd_r1 = src.fd_r2 = src.fd_r3 = 0;
+
+	/* Source: the part of the picture under r */
+	pxy[0] = r->g_x - x;
+	pxy[1] = r->g_y - y;
+	pxy[2] = pxy[0] + r->g_w - 1;
+	pxy[3] = pxy[1] + r->g_h - 1;
+	pxy[4] = r->g_x;
+	pxy[5] = r->g_y;
+	if (pxy[0] < 0) {
+		pxy[4] -= pxy[0];
+		pxy[0] = 0;
+	}
+	if (pxy[1] < 0) {
+		pxy[5] -= pxy[1];
+		pxy[1] = 0;
+	}
+	if (pxy[2] >= w) pxy[2] = w - 1;
+	if (pxy[3] >= h) pxy[3] = h - 1;
+	if (pxy[0] > pxy[2] || pxy[1] > pxy[3]) return;
+	pxy[6] = pxy[4] + pxy[2] - pxy[0];
+	pxy[7] = pxy[5] + pxy[3] - pxy[1];
+
+	col[1] = G_WHITE;
+	for (s = 0; s < n; s++) {
+		src.fd_addr = mask[s];
+		col[0] = pen[s];
+		vrt_cpyfm(vdi_handle, MD_TRANS, pxy, &src, &dst, col);
+	}
+}
+
+static void kb_draw(const GRECT *area) {
+	GRECT work, r;
+	short pxy[4];
+
+	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
 
 	wind_update(BEG_UPDATE);
 	graf_mouse(M_OFF, NULL);
@@ -560,39 +619,17 @@ static void kb_draw(const GRECT *area) {
 			pxy[1] = r.g_y;
 			pxy[2] = r.g_x + r.g_w - 1;
 			pxy[3] = r.g_y + r.g_h - 1;
-			vs_clip(kb_vdi, 1, pxy);
-			vswr_mode(kb_vdi, MD_REPLACE);
-			vsf_interior(kb_vdi, FIS_SOLID);
-			vsf_color(kb_vdi, G_BLACK);
-			vr_recfl(kb_vdi, pxy);
-
-			/* Source: the same rectangle in the picture */
-			pxy[4] = pxy[0];
-			pxy[5] = pxy[1];
-			pxy[6] = pxy[2];
-			pxy[7] = pxy[3];
-			pxy[0] -= work.g_x;
-			pxy[1] -= work.g_y;
-			pxy[2] -= work.g_x;
-			pxy[3] -= work.g_y;
-			if (pxy[2] >= kb_w) {
-				pxy[6] -= pxy[2] - (kb_w - 1);
-				pxy[2] = kb_w - 1;
-			}
-			if (pxy[3] >= kb_h) {
-				pxy[7] -= pxy[3] - (kb_h - 1);
-				pxy[3] = kb_h - 1;
-			}
-			col[1] = G_WHITE;
-			for (s = 0; s < kb_npens && pxy[0] <= pxy[2] && pxy[1] <= pxy[3]; s++) {
-				src.fd_addr = kb_mask[s];
-				col[0] = kb_pen[s];
-				vrt_cpyfm(kb_vdi, MD_TRANS, pxy, &src, &dst, col);
-			}
+			vs_clip(vdi_handle, 1, pxy);
+			vswr_mode(vdi_handle, MD_REPLACE);
+			vsf_interior(vdi_handle, FIS_SOLID);
+			vsf_color(vdi_handle, G_BLACK);
+			vr_recfl(vdi_handle, pxy);
+			masks_draw(kb_mask, kb_pen, kb_npens, kb_w, kb_h, kb_words,
+				work.g_x, work.g_y, &r);
 		}
 		wind_get_grect(kb_handle, WF_NEXTXYWH, &r);
 	}
-	vs_clip(kb_vdi, 0, pxy);
+	vs_clip(vdi_handle, 0, pxy);
 	graf_mouse(M_ON, NULL);
 	wind_update(END_UPDATE);
 }
@@ -606,32 +643,43 @@ static void kb_close(void) {
 	kb_handle = -1;
 }
 
-static void kb_exit(void) {
+static void ab_close(void);
+static void ab_free(void);
+
+static void windows_exit(void) {
 	kb_close();
 	kb_free();
-	if (kb_vdi) v_clsvwk(kb_vdi);
-	kb_vdi = 0;
+	ab_close();
+	ab_free();
+	if (vdi_handle) v_clsvwk(vdi_handle);
+	vdi_handle = 0;
+}
+
+/* On exit: returns TRUE if our VDI workstation is open */
+static int vdi_open(void) {
+	short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 }, work_out[57], dummy;
+
+	if (vdi_handle) return TRUE;
+	vdi_handle = graf_handle(&dummy, &dummy, &dummy, &dummy);
+	v_opnvwk(work_in, &vdi_handle, work_out);
+	if (!vdi_handle) {
+		form_alert(1, "[3][Cannot open a VDI workstation.][  OK  ]");
+		return FALSE;
+	}
+	vq_extnd(vdi_handle, 1, work_out);
+	vdi_planes = work_out[4];
+	atexit(windows_exit);
+	return TRUE;
 }
 
 static void kb_open(void) {
-	short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 }, work_out[57], dummy;
 	GRECT desk, outer;
 
 	if (kb_handle >= 0) {
 		wind_set(kb_handle, WF_TOP, 0, 0, 0, 0);
 		return;
 	}
-	if (!kb_vdi) {
-		kb_vdi = graf_handle(&dummy, &dummy, &dummy, &dummy);
-		v_opnvwk(work_in, &kb_vdi, work_out);
-		if (!kb_vdi) {
-			form_alert(1, "[3][Cannot open a VDI workstation|for the keyboard window.][  OK  ]");
-			return;
-		}
-		vq_extnd(kb_vdi, 1, work_out);
-		kb_planes = work_out[4];
-		atexit(kb_exit);
-	}
+	if (!vdi_open()) return;
 	if (!kb_load()) {
 		form_alert(1, "[3][Cannot load the keyboard picture|" PACKAGE_DATA_DIR
 			"\\kbzx80.bmp or kbzx81.bmp.][  OK  ]");
@@ -660,11 +708,11 @@ static void kb_open(void) {
 	wind_open_grect(kb_handle, &outer);
 }
 
-/* Machine changed (ZX80 <-> ZX81): show the other keyboard */
+/* Machine changed: show the other keyboard if its layout differs */
 static void kb_check_machine(void) {
 	GRECT work;
 
-	if (kb_handle < 0 || kb_machine == zx80) return;
+	if (kb_handle < 0 || kb_machine == KB_PICTURE()) return;
 	if (!kb_load()) {
 		kb_close();
 		return;
@@ -674,38 +722,393 @@ static void kb_check_machine(void) {
 	kb_draw(&work);
 }
 
-static int kb_is_top(void) {
+/* On exit: returns the handle of the top window if it is one of ours,
+ * else -1 */
+static short our_top_window(void) {
 	short top, dummy;
 
-	if (kb_handle < 0) return FALSE;
+	if (kb_handle < 0 && ab_handle < 0) return -1;
 	wind_get(0, WF_TOP, &top, &dummy, &dummy, &dummy);
-	return top == kb_handle;
+	return top;
 }
 
-/* On exit: returns TRUE if the message was for the keyboard window */
-static int kb_message(const short *message) {
-	if (kb_handle < 0 || message[0] < WM_REDRAW || message[0] > WM_TOOLBAR
-		|| message[3] != kb_handle)
+/* The window messages of our own windows
+ * On exit: returns TRUE if the message was for this window */
+static int window_message(const short *message, short handle,
+	void (*draw)(const GRECT *), void (*close)(void)) {
+	if (handle < 0 || message[0] < WM_REDRAW || message[0] > WM_TOOLBAR
+		|| message[3] != handle)
 		return FALSE;
 
 	switch (message[0]) {
 		case WM_REDRAW:
-			kb_draw((const GRECT *)&message[4]);
+			draw((const GRECT *)&message[4]);
 			break;
 		case WM_TOPPED:
-			wind_set(kb_handle, WF_TOP, 0, 0, 0, 0);
+			wind_set(handle, WF_TOP, 0, 0, 0, 0);
 			break;
 		case WM_BOTTOMED:
-			wind_set(kb_handle, WF_BOTTOM, 0, 0, 0, 0);
+			wind_set(handle, WF_BOTTOM, 0, 0, 0, 0);
 			break;
 		case WM_MOVED:
-			wind_set_grect(kb_handle, WF_CURRXYWH, (const GRECT *)&message[4]);
+			wind_set_grect(handle, WF_CURRXYWH, (const GRECT *)&message[4]);
 			break;
 		case WM_CLOSED:
-			kb_close();
+			close();
 			break;
 	}
 	return TRUE;
+}
+
+/***************************************************************************
+ * About window                                                            *
+ ***************************************************************************/
+/* A photo of a ZX81 (data/zx81.bmp, made by atari/mkabout.py) at the bottom
+ * left, the name in ZX81 block graphics at its top right, the text below
+ * the name and an OK button at the bottom right. The photo is drawn like
+ * the keyboard: with more than 256 colours each colour gets its own pen
+ * (after the keyboard's), otherwise it is dithered to the first 16 (or
+ * fewer) VDI pens. White is left to the dialog's background. */
+
+#define AB_PEN0 128			/* first pen of the photo with > 256 colours */
+#define AB_MAX_PENS 64
+#define AB_QUAD 8			/* one block graphics quarter cell, in pixels */
+#define AB_MARGIN 16
+#define AB_PIC_X 8
+
+/* "sz81" in ZX81 quarter cells */
+#define AB_GLYPH_W 4
+#define AB_GLYPH_H 7
+static const char *const ab_glyphs[4][AB_GLYPH_H] = {
+	{ "....", "....", ".###", "#...", ".##.", "...#", "###." },
+	{ "....", "....", "####", "..#.", ".#..", "#...", "####" },
+	{ ".##.", "#..#", "#..#", ".##.", "#..#", "#..#", ".##." },
+	{ "..#.", ".##.", "..#.", "..#.", "..#.", "..#.", ".###" },
+};
+#define AB_NAME_W ((4 * AB_GLYPH_W + 3 * 2) * AB_QUAD)
+#define AB_NAME_H (AB_GLYPH_H * AB_QUAD)
+
+/* An empty line is half a line high */
+static const char *const ab_lines[] = {
+	"Version " VERSION,
+	"ST version " ATARI_VERSION,
+	"",
+	"sz81 by Thunor and Chris Young,",
+	VERSION " updates by ikjordan,",
+	"based on z81 by Russell Marks.",
+	"ZX80 emulation and keyboard images",
+	"from EightyOne by Michael D Wynne.",
+	"",
+	"ST port by Mia Jaap (mia-jaap.de)",
+};
+#define AB_NLINES ((int)(sizeof(ab_lines) / sizeof(*ab_lines)))
+
+enum { AB_ROOT, AB_LINE0, AB_OK = AB_LINE0 + AB_NLINES, AB_COUNT };
+
+static OBJECT ab_tree[AB_COUNT];
+static char ab_ok_text[] = "OK";
+static short ab_handle = -1;
+static int ab_w, ab_h, ab_words, ab_npens;
+static short ab_pen[AB_MAX_PENS];
+static unsigned short *ab_mask[AB_MAX_PENS];
+static int ab_pic_y, ab_name_x, ab_name_y;
+
+static void ab_free(void) {
+	int i;
+
+	for (i = 0; i < ab_npens; i++) free(ab_mask[i]);
+	ab_npens = 0;
+}
+
+/* On exit: returns the mask slot of a pen, -1 if out of memory */
+static int ab_slot(short pen) {
+	int s;
+
+	for (s = 0; s < ab_npens; s++)
+		if (ab_pen[s] == pen) return s;
+	if (s == AB_MAX_PENS) return -1;
+	if ((ab_mask[s] = calloc(ab_words * 2L, ab_h)) == NULL) return -1;
+	ab_pen[s] = pen;
+	ab_npens++;
+	return s;
+}
+
+#define AB_WHITE(r, g, b) ((r) >= 240 && (g) >= 240 && (b) >= 240)
+
+/* On exit: returns TRUE if the photo is loaded */
+static int ab_load(void) {
+	char filename[256];
+	SDL_Surface *bmp;
+	SDL_Palette *pal;
+	SDL_Color *c;
+	short slot[256], rgb[3], npens, pr[16], pg[16], pb[16];
+	int *err, *cur, *nxt, *tmp;
+	int i, x, y, s, r, g, b, best, p;
+	long d, bestd;
+	Uint8 *row;
+
+	if (ab_npens) return TRUE;
+	strcpy(filename, PACKAGE_DATA_DIR);
+	strcatdelimiter(filename);
+	strcat(filename, "zx81.bmp");
+	if ((bmp = SDL_LoadBMP(filename)) == NULL) return FALSE;
+	pal = bmp->format->palette;
+	if (bmp->format->BitsPerPixel != 8 || pal == NULL) {
+		SDL_FreeSurface(bmp);
+		return FALSE;
+	}
+	ab_w = bmp->w;
+	ab_h = bmp->h;
+	ab_words = (ab_w + 15) / 16;
+	SDL_LockSurface(bmp);
+
+	if (vdi_planes > 8) {
+		/* Every colour its own pen */
+		for (i = 0; i < 256; i++) {
+			slot[i] = -1;
+			if (i >= pal->ncolors) continue;
+			c = &pal->colors[i];
+			if (AB_WHITE(c->r, c->g, c->b)) continue;
+			if ((s = ab_slot(AB_PEN0 + ab_npens)) < 0) continue;
+			rgb[0] = c->r * 1000L / 255;
+			rgb[1] = c->g * 1000L / 255;
+			rgb[2] = c->b * 1000L / 255;
+			vs_color(vdi_handle, ab_pen[s], rgb);
+			slot[i] = s;
+		}
+		for (y = 0; y < ab_h; y++) {
+			row = (Uint8 *)bmp->pixels + y * bmp->pitch;
+			for (x = 0; x < ab_w; x++)
+				if ((s = slot[row[x]]) >= 0)
+					ab_mask[s][y * ab_words + (x >> 4)] |= 0x8000 >> (x & 15);
+		}
+	} else {
+		/* Floyd-Steinberg to the pens the screen has, errors in 1/16 */
+		npens = vdi_planes >= 4 ? 16 : 1 << vdi_planes;
+		for (i = 0; i < npens; i++) {
+			vq_color(vdi_handle, i, 1, rgb);
+			pr[i] = rgb[0] * 255L / 1000;
+			pg[i] = rgb[1] * 255L / 1000;
+			pb[i] = rgb[2] * 255L / 1000;
+		}
+		err = calloc((ab_w + 2) * 6L, sizeof(int));
+		if (err == NULL) {
+			SDL_UnlockSurface(bmp);
+			SDL_FreeSurface(bmp);
+			return FALSE;
+		}
+		cur = err;
+		nxt = err + (ab_w + 2) * 3;
+		for (y = 0; y < ab_h; y++) {
+			row = (Uint8 *)bmp->pixels + y * bmp->pitch;
+			memset(nxt, 0, (ab_w + 2) * 3 * sizeof(int));
+			for (x = 0; x < ab_w; x++) {
+				c = &pal->colors[row[x] < pal->ncolors ? row[x] : 0];
+				p = (x + 1) * 3;
+				r = c->r + cur[p] / 16;
+				g = c->g + cur[p + 1] / 16;
+				b = c->b + cur[p + 2] / 16;
+				r = r < 0 ? 0 : r > 255 ? 255 : r;
+				g = g < 0 ? 0 : g > 255 ? 255 : g;
+				b = b < 0 ? 0 : b > 255 ? 255 : b;
+				best = 0;
+				bestd = 0x7fffffffL;
+				for (i = 0; i < npens; i++) {
+					d = (long)(r - pr[i]) * (r - pr[i]) + (long)(g - pg[i]) * (g - pg[i])
+						+ (long)(b - pb[i]) * (b - pb[i]);
+					if (d < bestd) {
+						bestd = d;
+						best = i;
+					}
+				}
+				if (!AB_WHITE(pr[best], pg[best], pb[best]) && (s = ab_slot(best)) >= 0)
+					ab_mask[s][y * ab_words + (x >> 4)] |= 0x8000 >> (x & 15);
+				r -= pr[best];
+				g -= pg[best];
+				b -= pb[best];
+				cur[p + 3] += r * 7; cur[p + 4] += g * 7; cur[p + 5] += b * 7;
+				nxt[p - 3] += r * 3; nxt[p - 2] += g * 3; nxt[p - 1] += b * 3;
+				nxt[p] += r * 5;     nxt[p + 1] += g * 5; nxt[p + 2] += b * 5;
+				nxt[p + 3] += r;     nxt[p + 4] += g;     nxt[p + 5] += b;
+			}
+			tmp = cur;
+			cur = nxt;
+			nxt = tmp;
+		}
+		free(err);
+	}
+	SDL_UnlockSurface(bmp);
+	SDL_FreeSurface(bmp);
+	/* A white photo still counts as loaded */
+	if (!ab_npens) ab_slot(G_WHITE);
+	return TRUE;
+}
+
+static void ab_obj(int i, int next, int type, int flags, int x, int y, int w, int h) {
+	memset(&ab_tree[i], 0, sizeof(OBJECT));
+	ab_tree[i].ob_next = next;
+	ab_tree[i].ob_head = ab_tree[i].ob_tail = -1;
+	ab_tree[i].ob_type = type;
+	ab_tree[i].ob_flags = flags;
+	ab_tree[i].ob_x = x;
+	ab_tree[i].ob_y = y;
+	ab_tree[i].ob_width = w;
+	ab_tree[i].ob_height = h;
+}
+
+/* The dialog in pixels, from the font size and the photo */
+static void ab_layout(void) {
+	short cw, ch, dummy;
+	int i, y, text_x, text_w, text_h, bw, bh, w, h, content;
+
+	graf_handle(&cw, &ch, &dummy, &dummy);
+	text_w = AB_NAME_W;
+	text_h = 0;
+	for (i = 0; i < AB_NLINES; i++) {
+		if ((int)strlen(ab_lines[i]) * cw > text_w) text_w = strlen(ab_lines[i]) * cw;
+		text_h += ab_lines[i][0] ? ch : ch / 2;
+	}
+	bw = 8 * cw;
+	bh = ch + 4;
+	text_x = AB_PIC_X + ab_w + AB_MARGIN;
+	content = AB_NAME_H + ch / 2 + text_h + ch / 2 + bh + AB_MARGIN / 2;
+	w = text_x + text_w + AB_MARGIN;
+	h = AB_MARGIN + (content > ab_h ? content : ab_h);
+
+	/* The name starts level with the top of the photo, which sits on the
+	 * bottom edge; only a large font pushes the photo further down */
+	ab_pic_y = h - ab_h;
+	ab_name_x = text_x;
+	ab_name_y = h - (content > ab_h ? content : ab_h);
+
+	ab_obj(AB_ROOT, -1, G_BOX, OF_NONE, 0, 0, w, h);
+	ab_tree[AB_ROOT].ob_spec.index = 0x00001100L;
+	ab_tree[AB_ROOT].ob_head = AB_LINE0;
+	ab_tree[AB_ROOT].ob_tail = AB_OK;
+	y = ab_name_y + AB_NAME_H + ch / 2;
+	for (i = 0; i < AB_NLINES; i++) {
+		ab_obj(AB_LINE0 + i, AB_LINE0 + i + 1, G_STRING, OF_NONE, text_x, y,
+			strlen(ab_lines[i]) * cw, ch);
+		ab_tree[AB_LINE0 + i].ob_spec.free_string = (char *)ab_lines[i];
+		y += ab_lines[i][0] ? ch : ch / 2;
+	}
+	ab_obj(AB_OK, AB_ROOT, G_BUTTON, OF_SELECTABLE | OF_DEFAULT | OF_EXIT | OF_LASTOB,
+		w - AB_MARGIN - bw, h - AB_MARGIN / 2 - bh, bw, bh);
+	ab_tree[AB_OK].ob_spec.free_string = ab_ok_text;
+}
+
+static void ab_draw(const GRECT *area) {
+	GRECT work, r;
+	short pxy[4];
+	int i, x, y, gx, gy;
+
+	wind_get_grect(ab_handle, WF_WORKXYWH, &work);
+	ab_tree[AB_ROOT].ob_x = work.g_x;
+	ab_tree[AB_ROOT].ob_y = work.g_y;
+
+	wind_update(BEG_UPDATE);
+	graf_mouse(M_OFF, NULL);
+	wind_get_grect(ab_handle, WF_FIRSTXYWH, &r);
+	while (r.g_w > 0 && r.g_h > 0) {
+		if (rc_intersect(area, &r) && rc_intersect(&work, &r)) {
+			objc_draw_grect(ab_tree, AB_ROOT, MAX_DEPTH, &r);
+			pxy[0] = r.g_x;
+			pxy[1] = r.g_y;
+			pxy[2] = r.g_x + r.g_w - 1;
+			pxy[3] = r.g_y + r.g_h - 1;
+			vs_clip(vdi_handle, 1, pxy);
+			masks_draw(ab_mask, ab_pen, ab_npens, ab_w, ab_h, ab_words,
+				work.g_x + AB_PIC_X, work.g_y + ab_pic_y, &r);
+
+			vswr_mode(vdi_handle, MD_REPLACE);
+			vsf_interior(vdi_handle, FIS_SOLID);
+			vsf_color(vdi_handle, G_BLACK);
+			vsf_perimeter(vdi_handle, 0);
+			for (i = 0; i < 4; i++) {
+				for (gy = 0; gy < AB_GLYPH_H; gy++) {
+					for (gx = 0; gx < AB_GLYPH_W; gx++) {
+						if (ab_glyphs[i][gy][gx] != '#') continue;
+						x = work.g_x + ab_name_x + (i * (AB_GLYPH_W + 2) + gx) * AB_QUAD;
+						y = work.g_y + ab_name_y + gy * AB_QUAD;
+						pxy[0] = x;
+						pxy[1] = y;
+						pxy[2] = x + AB_QUAD - 1;
+						pxy[3] = y + AB_QUAD - 1;
+						vr_recfl(vdi_handle, pxy);
+					}
+				}
+			}
+		}
+		wind_get_grect(ab_handle, WF_NEXTXYWH, &r);
+	}
+	vs_clip(vdi_handle, 0, pxy);
+	graf_mouse(M_ON, NULL);
+	wind_update(END_UPDATE);
+}
+
+static void ab_close(void) {
+	if (ab_handle < 0) return;
+	wind_close(ab_handle);
+	wind_delete(ab_handle);
+	ab_handle = -1;
+	ab_free();
+	ikbd_resync();
+}
+
+static void ab_open(void) {
+	GRECT desk, outer;
+
+	if (ab_handle >= 0) {
+		wind_set(ab_handle, WF_TOP, 0, 0, 0, 0);
+		return;
+	}
+	if (!vdi_open()) return;
+	if (!ab_load()) {
+		form_alert(1, "[3][Cannot load the picture|" PACKAGE_DATA_DIR
+			"\\zx81.bmp.][  OK  ]");
+		return;
+	}
+	ab_layout();
+
+	wind_get_grect(0, WF_WORKXYWH, &desk);
+	if ((ab_handle = wind_create_grect(NAME | CLOSER | MOVER, &desk)) < 0) {
+		ab_free();
+		form_alert(1, "[3][No more windows available.][  OK  ]");
+		return;
+	}
+	wind_set_str(ab_handle, WF_NAME, " About sz81 ");
+	outer.g_x = outer.g_y = 0;
+	outer.g_w = ab_tree[AB_ROOT].ob_width;
+	outer.g_h = ab_tree[AB_ROOT].ob_height;
+	wind_calc_grect(WC_BORDER, NAME | CLOSER | MOVER, &outer, &outer);
+	outer.g_x = desk.g_x + (desk.g_w - outer.g_w) / 2;
+	outer.g_y = desk.g_y + (desk.g_h - outer.g_h) / 2;
+	if (outer.g_x < desk.g_x) outer.g_x = desk.g_x;
+	if (outer.g_y < desk.g_y) outer.g_y = desk.g_y;
+	ab_close_pending = FALSE;
+	wind_open_grect(ab_handle, &outer);
+}
+
+/* Every frame: the OK button and the keys that close the window */
+static void ab_poll(void) {
+	short mx, my, mb, ks;
+
+	if (ab_handle < 0) return;
+	if (ab_close_pending) {
+		ab_close_pending = FALSE;
+		ab_close();
+		return;
+	}
+	graf_mkstate(&mx, &my, &mb, &ks);
+	if (!(mb & 1) || our_top_window() != ab_handle) return;
+	if (objc_find(ab_tree, AB_ROOT, MAX_DEPTH, mx, my) != AB_OK) return;
+	wind_update(BEG_MCTRL);
+	if (graf_watchbox(ab_tree, AB_OK, OS_SELECTED, OS_NORMAL)) {
+		wind_update(END_MCTRL);
+		ab_close();
+		return;
+	}
+	wind_update(END_MCTRL);
 }
 
 /***************************************************************************
@@ -715,7 +1118,8 @@ static int kb_message(const short *message) {
 enum {
 	M_ROOT, M_BAR, M_ACTIVE, M_T_DESK, M_T_FILE, M_T_VIEW, M_SCREEN,
 	M_DESKBOX, M_ABOUT, M_DESKSEP, M_ACC1, M_ACC2, M_ACC3, M_ACC4, M_ACC5, M_ACC6,
-	M_FILEBOX, M_OPEN, M_FILESEP1, M_SCREENSHOT, M_FILESEP2, M_QUIT,
+	M_FILEBOX, M_OPEN, M_FILESEP1, M_LOADSTATE, M_SAVESTATE, M_FILESEP2,
+	M_SCREENSHOT, M_FILESEP3, M_RESET, M_QUIT,
 	M_VIEWBOX, M_INVERT, M_KEYBOARD,
 	M_COUNT
 };
@@ -748,6 +1152,7 @@ static char s_t_file[] = " File ";
 static char s_t_view[] = " View ";
 static char s_about[DESK_W + 1], s_desksep[DESK_W + 1], s_acc[6][DESK_W + 1];
 static char s_open[FILE_W + 1], s_screenshot[FILE_W + 1], s_quit[FILE_W + 1];
+static char s_loadstate[FILE_W + 1], s_savestate[FILE_W + 1], s_reset[FILE_W + 1];
 static char s_filesep[FILE_W + 1];
 static char s_invert[VIEW_W + 1], s_keyboard[VIEW_W + 1];
 
@@ -810,12 +1215,16 @@ static void menu_build(void) {
 		menu_item(M_ACC1 + i, i < 5 ? M_ACC1 + i + 1 : M_DESKBOX, s_acc[i], DESK_W, 2 + i, name, "");
 	}
 
-	menu_obj(M_FILEBOX, M_VIEWBOX, M_OPEN, M_QUIT, G_BOX, OS_NORMAL, 0x00FF1100L, 8, 0, FILE_W, 5);
+	menu_obj(M_FILEBOX, M_VIEWBOX, M_OPEN, M_QUIT, G_BOX, OS_NORMAL, 0x00FF1100L, 8, 0, FILE_W, 9);
 	menu_item(M_OPEN, M_FILESEP1, s_open, FILE_W, 0, "Open...", "^O");
-	menu_separator(M_FILESEP1, M_SCREENSHOT, s_filesep, FILE_W, 1);
-	menu_item(M_SCREENSHOT, M_FILESEP2, s_screenshot, FILE_W, 2, "Save screenshot", "^T");
-	menu_separator(M_FILESEP2, M_QUIT, s_filesep, FILE_W, 3);
-	menu_item(M_QUIT, M_FILEBOX, s_quit, FILE_W, 4, "Quit", "^Q");
+	menu_separator(M_FILESEP1, M_LOADSTATE, s_filesep, FILE_W, 1);
+	menu_item(M_LOADSTATE, M_SAVESTATE, s_loadstate, FILE_W, 2, "Load State...", "");
+	menu_item(M_SAVESTATE, M_FILESEP2, s_savestate, FILE_W, 3, "Save State...", "");
+	menu_separator(M_FILESEP2, M_SCREENSHOT, s_filesep, FILE_W, 4);
+	menu_item(M_SCREENSHOT, M_FILESEP3, s_screenshot, FILE_W, 5, "Save screenshot", "^T");
+	menu_separator(M_FILESEP3, M_RESET, s_filesep, FILE_W, 6);
+	menu_item(M_RESET, M_QUIT, s_reset, FILE_W, 7, "Reset...", "");
+	menu_item(M_QUIT, M_FILEBOX, s_quit, FILE_W, 8, "Quit", "^Q");
 
 	menu_obj(M_VIEWBOX, M_SCREEN, M_INVERT, M_KEYBOARD, G_BOX, OS_NORMAL, 0x00FF1100L, 14, 0, VIEW_W, 2);
 	menu_item(M_INVERT, M_KEYBOARD, s_invert, VIEW_W, 0, "Invert", "");
@@ -846,7 +1255,8 @@ static int gem_message(const short *message) {
 		menu_tnormal(menu, message[3], 1);
 		return TRUE;
 	}
-	return kb_message(message);
+	return window_message(message, kb_handle, kb_draw, kb_close)
+		|| window_message(message, ab_handle, ab_draw, ab_close);
 }
 
 /* On exit: returns TRUE if Control and this key are a menu shortcut */
@@ -881,17 +1291,34 @@ static void menu_update_checks(void) {
 static void menu_do(int item) {
 	switch (item) {
 		case M_ABOUT:
-			form_alert(1, "[1][sz81 " VERSION "|ZX80/ZX81 emulator|"
-				"|Atari port][  OK  ]");
-			ikbd_resync();
+			ab_open();
 			break;
 		case M_OPEN:
 			/* As F3: the selector, then a reset and the load */
 			toggle_ldfile_state();
 			break;
+		case M_LOADSTATE:
+			/* As F5: sz81's own slot dialog */
+			toggle_sstate_state(SSTATE_MODE_LOAD);
+			break;
+		case M_SAVESTATE:
+			/* As F4 */
+			toggle_sstate_state(SSTATE_MODE_SAVE);
+			break;
 		case M_SCREENSHOT:
 			/* As PrtScn: a BMP in the local scnsht folder */
 			save_screenshot();
+			break;
+		case M_RESET:
+			/* As F12, which works only when no sz81 dialog is open */
+			if (get_active_component() != COMP_VKEYB &&
+				get_active_component() != COMP_CTB &&
+				get_active_component() != COMP_EMU)
+				break;
+			if (form_alert(1, "[2][Reset the emulated machine?|"
+				"The program in memory is lost.][Cancel|Reset]") == 2)
+				emulator_reset();
+			ikbd_resync();
 			break;
 		case M_QUIT:
 			/* The desktop would take the Q of ^Q as a key of its own */
@@ -917,12 +1344,33 @@ static void menu_do(int item) {
  * Called every frame from check_events                                    *
  ***************************************************************************/
 
+/* The window title names the machine; zx80 is 0 = ZX81, 1 = ZX80 with the
+ * 4K ROM, 2 = ZX80 with the 8K ROM */
+static void update_title(void) {
+	static int machine = -1;
+	static const char *const names[] = { "ZX81", "ZX80 4K", "ZX80 8K" };
+	char title[32];
+
+	if (machine == zx80 || zx80 < 0 || zx80 > 2) return;
+	machine = zx80;
+	sprintf(title, "sz81 - %s", names[machine]);
+	SDL_WM_SetCaption(title, "sz81");
+}
+
 void atari_poll(void) {
 	static int state = -1;	/* -1 = first call, 0 = nothing to do, 1 = GEM */
 	int item;
 
 	if (state < 0) {
 		state = atari_gem_driver();
+		if (state) {
+			/* Under a multitasking AES: our name in the application list,
+			 * and AP_TERM is understood (SDL's GEM driver quits on it) */
+			if (_AESnumapps != 1)
+				menu_register(gl_apid, "  sz81 Emulator");
+			if (_AESversion >= 0x400)
+				shel_write(SWM_NEWMSG, NM_APTERM, 0, NULL, NULL);
+		}
 		if (state && SDL_AtariGem_SetMessageHook) {
 			menu_build();
 			if (menu_bar(menu, MENU_INSTALL) > 0) {
@@ -938,6 +1386,8 @@ void atari_poll(void) {
 
 	if (hook_active) ikbd_pump();
 	kb_check_machine();
+	ab_poll();
+	update_title();
 	menu_update_checks();
 
 	if ((item = menu_pick) != 0) {
