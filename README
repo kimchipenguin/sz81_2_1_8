@@ -326,7 +326,9 @@ For the GPH GP2X/Wiz:
 4.Compilation and Installation
 ==============================
 
-Extract the sz81 source package and change into the extracted directory.
+Extract the sz81 source package and change into the source folder of the
+extracted directory. The binary is built in the extracted directory itself,
+next to the data folder.
 
 For desktop Linux:
 

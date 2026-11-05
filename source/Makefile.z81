@@ -1,4 +1,5 @@
 # makefile for z81/xz81
+# Run in the source folder; the man pages are in the project root.
 
 # You need an ANSI C compiler. gcc is probably best.
 CC=gcc
@@ -84,7 +85,7 @@ install: installdirs
 	if [ -f zx80.rom ]; then install -m 644 zx80.rom $(LIBDIR); fi
 	if [ -f zx81.rom ]; then install -m 644 zx81.rom $(LIBDIR); fi
 	install -m 644 zx80kybd.pbm zx81kybd.pbm xz81.xpm $(LIBDIR)
-	install -m 644 z81.1 zx81get.1 $(MANDIR)
+	install -m 644 ../z81.1 ../zx81get.1 $(MANDIR)
 	ln -sf $(MANDIR)/z81.1 $(MANDIR)/xz81.1
 
 uninstall:

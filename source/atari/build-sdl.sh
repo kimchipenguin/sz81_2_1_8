@@ -3,11 +3,11 @@
 # toolchain: static libraries, one per CPU, installed under
 # atari/sdl-install/<cpu> (sdl-config and pkg-config files included).
 #
-# usage: atari/build-sdl.sh [cpu ...]     default: m68000 m68020-60 m5475
+# usage (in source/): atari/build-sdl.sh [cpu ...]     default: m68000 m68020-60 m5475
 #
-# then:  make -f Makefile.atari SDL_PREFIX=atari/sdl-install
-#        make -f Makefile.atari SDL_PREFIX=atari/sdl-install CPU=-m68020-60
-#        make -f Makefile.atari SDL_PREFIX=atari/sdl-install CPU=-mcpu=5475
+# then:  make -f Makefile.atari
+#        make -f Makefile.atari CPU=-m68020-60
+#        make -f Makefile.atari CPU=-mcpu=5475
 #
 # The source is atari/SDL-1.2; when missing, upstream SDL-1.2 is cloned at
 # the commit sz81 was tested with (set SDL_COMMIT to use another one). Its

@@ -12,5 +12,7 @@ void atari_poll(void);
 int atari_save_png(SDL_Surface *surface, const char *filename);
 void atari_audio_probe(void);
 void atari_audio_diagnose(void);
+void atari_palette_load(const char *program);
+void atari_gem_exit(void);
 
 #endif

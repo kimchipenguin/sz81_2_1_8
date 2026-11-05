@@ -1,3 +1,4 @@
+# Run in the source folder; the binary goes to the project root above it.
 # You won't need to alter these
 TARGET=$(shell cat TARGET)
 SOURCES=sdl_main.c common.c sound.c z80.c sdl_engine.c sdl_hotspots.c \
@@ -21,9 +22,9 @@ LDFLAGS=-L$(DEVPREFIX)/arm-gp2x-linux/lib
 LIBS=`$(DEVPREFIX)/arm-gp2x-linux/bin/arm-linux-sdl-config --prefix=$(DEVPREFIX) --libs`
 
 # You won't need to alter anything below
-all: $(SOURCES) $(TARGET)
+all: $(SOURCES) ../$(TARGET)
 
-$(TARGET): $(OBJECTS)
+../$(TARGET): $(OBJECTS)
 	$(LINK) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@
 	gp2x/build-$(TARGET)
 

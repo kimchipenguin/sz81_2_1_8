@@ -17,7 +17,7 @@ if test -a VERSION ; then
 			mkdir -p ipk/${PREFIX}/pics
 			mkdir -p ipk/${PREFIX}/share/${TARGET}
 
-			cp data/* ipk/${PREFIX}/share/${TARGET}
+			cp ../data/* ipk/${PREFIX}/share/${TARGET}
 			
 			echo "Package: ${TARGET}" > zaurus/control
 			echo "Priority: optional" >> zaurus/control
@@ -33,9 +33,9 @@ if test -a VERSION ; then
 			cp zaurus/control ipk/CONTROL
 			cp zaurus/${TARGET}.desktop ipk/${PREFIX}/apps/Games
 			cp icon-${TARGET}-32.png ipk/${PREFIX}/pics/${TARGET}.png
-			cp ${TARGET} zaurus/run${TARGET} ipk/${PREFIX}/bin
-			cp README ipk/${PREFIX}/share/${TARGET}
-			cp ChangeLog NEWS COPYING ipk/${PREFIX}/share/${TARGET}
+			cp ../${TARGET} zaurus/run${TARGET} ipk/${PREFIX}/bin
+			cp ../README ipk/${PREFIX}/share/${TARGET}
+			cp ../ChangeLog ../NEWS ../COPYING ipk/${PREFIX}/share/${TARGET}
 
 			zaurus/ipkg-build ipk
 			

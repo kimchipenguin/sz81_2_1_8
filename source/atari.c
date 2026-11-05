@@ -16,7 +16,8 @@
  * events are made from that while SDL's own are filtered out. The menu bar
  * needs our SDL build, whose GEM driver shows us every AES message first
  * (SDL_AtariGem_SetMessageHook), so we also get the messages of our own
- * windows: the keyboard window (View > Keyboard) and the About window.
+ * windows: the keyboard window (View > Keyboard), the About window and the
+ * Hardware dialog (Options > Hardware..., a CF-Lib window dialog).
  */
 
 #include <stdio.h>
@@ -24,6 +25,7 @@
 #include <string.h>
 #include <signal.h>
 #include <gem.h>
+#include <cflib.h>
 #include <support.h>
 #include <mint/osbind.h>
 #include <mint/cookie.h>
@@ -32,9 +34,10 @@
 #include <zlib.h>
 #include "sdl_engine.h"
 #include "atari.h"
+#include "atari/sz81_rsc.h"
 
 /* Version of the Atari port, shown in the About window */
-#define ATARI_VERSION "0.8"
+#define ATARI_VERSION "0.8.5"
 
 char *atari_file_request_retval = NULL;
 
@@ -63,6 +66,29 @@ int atari_aes_available(void) {
 		}
 	}
 	return aes_state;
+}
+
+/***************************************************************************
+ * Resource file                                                           *
+ ***************************************************************************/
+/* SZ81.RSC next to the program holds the menu bar, the Hardware dialog and
+ * all texts of the GEM user interface (written by atari/mkrsc.py), so it
+ * can be translated with a resource editor. It is only needed under a
+ * multitasking AES, where SDL uses its GEM driver. */
+
+static int rsc_loaded;
+
+/* On exit: returns free string i of the resource file */
+static char *rs(int i) {
+	char **p = NULL;
+
+	if (!rsc_loaded) return "";
+	rsrc_gaddr(R_FRSTR, i, &p);
+	return p && *p ? *p : "";
+}
+
+static int rs_alert(int i) {
+	return form_alert(1, rs(i));
 }
 
 /***************************************************************************
@@ -344,6 +370,9 @@ static int menu_shortcut(int sc);
 static short our_top_window(void);
 static short kb_handle, ab_handle;
 static int ab_close_pending;
+static WDIALOG *hw_wd;
+static int hw_is_open(void);
+static void hw_key(int sc, const unsigned char *down);
 
 /* Turn the key changes since the last pump into SDL key events: modifier
  * presses first, so Shift+P reaches the ZX81 as Shift+P, and modifier
@@ -355,10 +384,17 @@ static void ikbd_pump(void) {
 	short top;
 
 	/* The emulator keeps the keys while its keyboard window is on top. The
-	 * About window takes them: Return, Enter and Escape close it */
+	 * About window takes them: Return, Enter and Escape close it. The
+	 * Hardware dialog gets them through CF-Lib */
 	top = our_top_window();
 	if (top >= 0 && top == ab_handle) {
 		if (khit[SC_RETURN] || khit[SC_ENTER] || khit[SC_ESC]) ab_close_pending = TRUE;
+		focus = FALSE;
+	} else if (top >= 0 && hw_is_open() && top == hw_wd->win_handle) {
+		for (sc = 0; sc < 128; sc++)
+			now[sc] = kdown[sc] ? 1 : 0;
+		for (sc = 1; sc < 128; sc++)
+			if (khit[sc] && !is_modifier(sc)) hw_key(sc, now);
 		focus = FALSE;
 	} else {
 		focus = (SDL_GetAppState() & SDL_APPINPUTFOCUS) != 0
@@ -424,7 +460,15 @@ static void ikbd_resync(void) {
  * gets its own pen; with a palette the pens are the standard VDI colours, so
  * other applications' colours stay as they are. In monochrome the keys are
  * white on black: a label is white on the background and black on a key,
- * which a scan along each row tells apart. */
+ * which a scan along each row tells apart.
+ *
+ * The keys can be clicked: a click is a key press for as long as the mouse
+ * button is down, SHIFT stays down until the next key has been clicked.
+ * Every key the emulated machine sees down (keyports[], whether typed,
+ * clicked or from sz81's own virtual keyboard) is lit and stays so for a
+ * second after it went up: yellow on the ZX81, dark blue on the ZX80 (white
+ * lettering), inverted in monochrome. The colour covers the key face
+ * colour only, so the labels stay readable. */
 
 #define KB_MAX_PENS 64
 
@@ -454,9 +498,48 @@ static int kb_w, kb_h, kb_words;
 static int kb_npens;
 static short kb_pen[KB_MAX_PENS];
 static unsigned short *kb_mask[KB_MAX_PENS];
-static char kb_title[24];
+static char kb_title[64];
 static GRECT kb_pos;			/* where the window was when closed */
 static int kb_pos_set;
+
+/* The key faces in the pictures (x, y, w, h; measured from them), in the
+ * rows of the ZX keyboard: 1-0, Q-P, A-NEWLINE, SHIFT-SPACE */
+#define KB_KEYS 40
+#define KB_SHIFT 30
+#define KB_LIT_MS 1000
+#define KB_CLICK_MS 80		/* shortest press of a click: the ROM must see it */
+static const short kb_keys[2][KB_KEYS][4] = {
+	{ /* kbzx81 */
+		{ 5, 17, 36, 33 }, { 51, 17, 37, 33 }, { 97, 17, 38, 33 }, { 145, 17, 37, 33 }, { 190, 17, 38, 33 }, { 238, 17, 38, 33 }, { 286, 17, 37, 33 }, { 331, 17, 37, 33 }, { 380, 17, 37, 33 }, { 427, 17, 36, 33 },
+		{ 30, 64, 36, 33 }, { 75, 64, 38, 33 }, { 122, 64, 38, 33 }, { 169, 64, 37, 33 }, { 215, 64, 37, 33 }, { 263, 64, 37, 33 }, { 311, 64, 37, 33 }, { 357, 64, 37, 33 }, { 402, 64, 38, 33 }, { 450, 64, 36, 33 },
+		{ 40, 120, 37, 33 }, { 87, 120, 37, 33 }, { 134, 120, 38, 33 }, { 181, 120, 37, 33 }, { 227, 120, 38, 33 }, { 274, 120, 38, 33 }, { 320, 120, 37, 33 }, { 367, 120, 37, 33 }, { 415, 120, 37, 33 }, { 462, 120, 36, 33 },
+		{ 19, 176, 36, 33 }, { 62, 176, 38, 33 }, { 111, 176, 37, 33 }, { 158, 176, 37, 33 }, { 205, 176, 38, 33 }, { 250, 176, 38, 33 }, { 297, 176, 36, 33 }, { 344, 176, 38, 33 }, { 391, 175, 37, 33 }, { 438, 175, 36, 33 },
+	},
+	{ /* kbzx80 */
+		{ 4, 16, 36, 33 }, { 50, 16, 37, 33 }, { 96, 16, 38, 33 }, { 144, 16, 37, 33 }, { 189, 16, 38, 33 }, { 237, 16, 38, 33 }, { 285, 16, 37, 33 }, { 330, 16, 37, 33 }, { 379, 16, 37, 33 }, { 426, 16, 36, 33 },
+		{ 28, 71, 36, 33 }, { 73, 71, 38, 33 }, { 120, 71, 38, 33 }, { 167, 71, 37, 33 }, { 213, 71, 37, 33 }, { 261, 71, 37, 33 }, { 309, 71, 37, 33 }, { 355, 71, 37, 33 }, { 400, 71, 38, 33 }, { 448, 71, 36, 33 },
+		{ 38, 127, 37, 33 }, { 85, 127, 37, 33 }, { 132, 127, 38, 33 }, { 179, 127, 37, 33 }, { 225, 127, 38, 33 }, { 272, 127, 38, 33 }, { 318, 127, 37, 33 }, { 365, 127, 37, 33 }, { 413, 127, 37, 33 }, { 460, 127, 36, 33 },
+		{ 17, 183, 36, 33 }, { 60, 183, 38, 33 }, { 109, 183, 37, 33 }, { 156, 183, 37, 33 }, { 203, 183, 38, 33 }, { 248, 183, 38, 33 }, { 295, 183, 36, 33 }, { 342, 183, 38, 33 }, { 389, 182, 37, 33 }, { 436, 182, 36, 33 },
+	},
+};
+
+/* The PC keys sz81 reads for the ZX keys (sdl_main.c check_events) */
+static const SDLKey kb_syms[KB_KEYS] = {
+	SDLK_1, SDLK_2, SDLK_3, SDLK_4, SDLK_5, SDLK_6, SDLK_7, SDLK_8, SDLK_9, SDLK_0,
+	SDLK_q, SDLK_w, SDLK_e, SDLK_r, SDLK_t, SDLK_y, SDLK_u, SDLK_i, SDLK_o, SDLK_p,
+	SDLK_a, SDLK_s, SDLK_d, SDLK_f, SDLK_g, SDLK_h, SDLK_j, SDLK_k, SDLK_l, SDLK_RETURN,
+	SDLK_LSHIFT, SDLK_z, SDLK_x, SDLK_c, SDLK_v, SDLK_b, SDLK_n, SDLK_m, SDLK_PERIOD, SDLK_SPACE,
+};
+
+static short kb_slot_base[KB_MAX_PENS];	/* kb_base entry of each mask */
+static short kb_key_base[KB_KEYS];		/* kb_base entry of each key face */
+static short kb_lit_pen;				/* pen of a lit key */
+static unsigned char kb_lit[KB_KEYS];	/* drawn in yellow */
+static Uint32 kb_lit_until[KB_KEYS];
+static int kb_click = -1;				/* key held by the mouse */
+static int kb_shift_latched;
+static Uint32 kb_click_until;
+static short kb_mb_prev;
 
 static void kb_free(void) {
 	int i;
@@ -545,6 +628,7 @@ static int kb_load(void) {
 			kb_mask[s] = calloc(kb_words * 2L, kb_h);
 			if (kb_mask[s] == NULL) break;
 			kb_pen[s] = pen;
+			kb_slot_base[s] = base;
 			kb_npens++;
 			if (vdi_planes > 8) {
 				rgb[0] = pal->colors[i].r * 1000L / 255;
@@ -571,11 +655,46 @@ static int kb_load(void) {
 			kb_mask[s][y * kb_words + (x >> 4)] |= 0x8000 >> (x & 15);
 		}
 	}
+
+	/* The face of a key is its most used colour other than black */
+	for (i = 0; i < KB_KEYS; i++) {
+		const short *k = kb_keys[KB_PICTURE()][i];
+		long count[KB_NBASE];
+		int b;
+
+		memset(count, 0, sizeof(count));
+		for (y = k[1]; y < k[1] + k[3] && y < kb_h; y++) {
+			row = (Uint8 *)bmp->pixels + y * bmp->pitch;
+			for (x = k[0]; x < k[0] + k[2] && x < kb_w; x++)
+				if (slot[row[x]] >= 0) count[base_of[row[x]]]++;
+		}
+		kb_key_base[i] = 1;
+		for (b = 1; b < KB_NBASE; b++)
+			if (count[b] > count[kb_key_base[i]]) kb_key_base[i] = b;
+		kb_lit[i] = FALSE;
+		kb_lit_until[i] = 0;
+	}
+	/* Yellow on the ZX81; the ZX80's white lettering needs dark blue */
+	if (vdi_planes > 8) {
+		if (KB_PICTURE() == KB_ZX80) {
+			rgb[0] = 0;
+			rgb[1] = 0;
+			rgb[2] = 450;
+		} else {
+			rgb[0] = 1000;
+			rgb[1] = 900;
+			rgb[2] = 0;
+		}
+		kb_lit_pen = 16 + KB_MAX_PENS;
+		vs_color(vdi_handle, kb_lit_pen, rgb);
+	} else {
+		kb_lit_pen = KB_PICTURE() == KB_ZX80 ? G_LBLUE : G_YELLOW;
+	}
 	SDL_UnlockSurface(bmp);
 	SDL_FreeSurface(bmp);
 
 	kb_machine = KB_PICTURE();
-	sprintf(kb_title, " ZX8%d Keyboard ", kb_machine == KB_ZX80 ? 0 : 1);
+	strncpy(kb_title, rs(kb_machine == KB_ZX80 ? FS_KB_ZX80 : FS_KB_ZX81), sizeof(kb_title) - 1);
 	return TRUE;
 }
 
@@ -624,6 +743,38 @@ static void masks_draw(unsigned short *const *mask, const short *pen, int n,
 	}
 }
 
+/* The lit keys inside r (already clipped to it): their face colour masks in
+ * kb_lit_pen, in monochrome the key inverted */
+static void kb_draw_lit(const GRECT *work, const GRECT *r) {
+	GRECT kr;
+	short pxy[4];
+	int i, s;
+
+	for (i = 0; i < KB_KEYS; i++) {
+		if (!kb_lit[i]) continue;
+		kr.g_x = work->g_x + kb_keys[kb_machine][i][0];
+		kr.g_y = work->g_y + kb_keys[kb_machine][i][1];
+		kr.g_w = kb_keys[kb_machine][i][2];
+		kr.g_h = kb_keys[kb_machine][i][3];
+		if (!rc_intersect(r, &kr)) continue;
+		if (vdi_planes == 1) {
+			pxy[0] = kr.g_x;
+			pxy[1] = kr.g_y;
+			pxy[2] = kr.g_x + kr.g_w - 1;
+			pxy[3] = kr.g_y + kr.g_h - 1;
+			vswr_mode(vdi_handle, MD_XOR);
+			vsf_color(vdi_handle, G_BLACK);
+			vr_recfl(vdi_handle, pxy);
+			vswr_mode(vdi_handle, MD_REPLACE);
+			continue;
+		}
+		for (s = 0; s < kb_npens; s++)
+			if (kb_slot_base[s] == kb_key_base[i])
+				masks_draw(&kb_mask[s], &kb_lit_pen, 1, kb_w, kb_h, kb_words,
+					work->g_x, work->g_y, &kr);
+	}
+}
+
 static void kb_draw(const GRECT *area) {
 	GRECT work, r;
 	short pxy[4];
@@ -646,6 +797,7 @@ static void kb_draw(const GRECT *area) {
 			vr_recfl(vdi_handle, pxy);
 			masks_draw(kb_mask, kb_pen, kb_npens, kb_w, kb_h, kb_words,
 				work.g_x, work.g_y, &r);
+			kb_draw_lit(&work, &r);
 		}
 		wind_get_grect(kb_handle, WF_NEXTXYWH, &r);
 	}
@@ -654,8 +806,11 @@ static void kb_draw(const GRECT *area) {
 	wind_update(END_UPDATE);
 }
 
+static void kb_release_click(void);
+
 static void kb_close(void) {
 	if (kb_handle < 0) return;
+	kb_release_click();
 	wind_get_grect(kb_handle, WF_CURRXYWH, &kb_pos);
 	kb_pos_set = TRUE;
 	wind_close(kb_handle);
@@ -665,12 +820,14 @@ static void kb_close(void) {
 
 static void ab_close(void);
 static void ab_free(void);
+static void hw_close(void);
 
 static void windows_exit(void) {
 	kb_close();
 	kb_free();
 	ab_close();
 	ab_free();
+	hw_close();
 	if (vdi_handle) v_clsvwk(vdi_handle);
 	vdi_handle = 0;
 }
@@ -683,7 +840,7 @@ static int vdi_open(void) {
 	vdi_handle = graf_handle(&dummy, &dummy, &dummy, &dummy);
 	v_opnvwk(work_in, &vdi_handle, work_out);
 	if (!vdi_handle) {
-		form_alert(1, "[3][Cannot open a VDI workstation.][  OK  ]");
+		rs_alert(AL_NOVDI);
 		return FALSE;
 	}
 	vq_extnd(vdi_handle, 1, work_out);
@@ -701,14 +858,13 @@ static void kb_open(void) {
 	}
 	if (!vdi_open()) return;
 	if (!kb_load()) {
-		form_alert(1, "[3][Cannot load the keyboard picture|" PACKAGE_DATA_DIR
-			"\\kbzx80.bmp or kbzx81.bmp.][  OK  ]");
+		rs_alert(AL_NOKBPIC);
 		return;
 	}
 
 	wind_get_grect(0, WF_WORKXYWH, &desk);
 	if ((kb_handle = wind_create_grect(NAME | CLOSER | MOVER, &desk)) < 0) {
-		form_alert(1, "[3][No more windows available.][  OK  ]");
+		rs_alert(AL_NOWINDOW);
 		return;
 	}
 	wind_set_str(kb_handle, WF_NAME, kb_title);
@@ -733,6 +889,7 @@ static void kb_check_machine(void) {
 	GRECT work;
 
 	if (kb_handle < 0 || kb_machine == KB_PICTURE()) return;
+	kb_release_click();
 	if (!kb_load()) {
 		kb_close();
 		return;
@@ -742,12 +899,101 @@ static void kb_check_machine(void) {
 	kb_draw(&work);
 }
 
+/* A ZX key as an SDL key event, the way sz81 reads the PC keyboard */
+static void kb_send(int key, int pressed) {
+	SDL_Event event;
+
+	memset(&event, 0, sizeof(event));
+	event.type = pressed ? SDL_KEYDOWN : SDL_KEYUP;
+	event.key.state = pressed ? SDL_PRESSED : SDL_RELEASED;
+	event.key.keysym.sym = kb_syms[key];
+	event.key.keysym.mod = SDL_GetModState();
+	SDL_PushEvent(&event);
+}
+
+/* The mouse no longer holds a key: release it and a latched SHIFT */
+static void kb_release_click(void) {
+	if (kb_click >= 0) kb_send(kb_click, FALSE);
+	kb_click = -1;
+	if (kb_shift_latched) kb_send(KB_SHIFT, FALSE);
+	kb_shift_latched = FALSE;
+}
+
+/* On exit: returns TRUE if the emulated machine sees the key down. The
+ * half-rows of the matrix: 0 SHIFT-V, 1 A-G, 2 Q-T, 3 1-5 (bits 0-4 from
+ * the left), 4 0-6, 5 P-Y, 6 NEWLINE-H, 7 SPACE-B (bits 0-4 from the right) */
+static int kb_key_down(int key) {
+	int row = key / 10, col = key % 10;
+	int port = col < 5 ? 3 - row : 4 + row;
+	int bit = col < 5 ? col : 9 - col;
+
+	return !(keyports[port] & (1 << bit));
+}
+
+/* On exit: returns the key under the screen position, -1 if none */
+static int kb_key_at(short mx, short my) {
+	GRECT work;
+	int i, x, y;
+	const short *k;
+
+	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
+	x = mx - work.g_x;
+	y = my - work.g_y;
+	for (i = 0; i < KB_KEYS; i++) {
+		k = kb_keys[kb_machine][i];
+		if (x >= k[0] && x < k[0] + k[2] && y >= k[1] && y < k[1] + k[3]) return i;
+	}
+	return -1;
+}
+
+/* Every frame: clicks on the keys and the yellow keys */
+static void kb_poll(void) {
+	short mx, my, mb, ks;
+	GRECT work, kr;
+	Uint32 now;
+	int i, lit;
+
+	if (kb_handle < 0 || kb_machine < 0) return;
+	now = SDL_GetTicks();
+
+	graf_mkstate(&mx, &my, &mb, &ks);
+	if ((mb & 1) && !(kb_mb_prev & 1) && kb_click < 0 &&
+		wind_find(mx, my) == kb_handle && (i = kb_key_at(mx, my)) >= 0) {
+		if (i == KB_SHIFT) {
+			/* SHIFT stays down until the next key */
+			kb_shift_latched = !kb_shift_latched;
+			kb_send(KB_SHIFT, kb_shift_latched);
+		} else {
+			kb_send(i, TRUE);
+			kb_click = i;
+			kb_click_until = now + KB_CLICK_MS;
+		}
+	}
+	if (!(mb & 1) && kb_click >= 0 && (Sint32)(now - kb_click_until) >= 0)
+		kb_release_click();
+	kb_mb_prev = mb;
+
+	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
+	for (i = 0; i < KB_KEYS; i++) {
+		if (kb_key_down(i) || i == kb_click || (i == KB_SHIFT && kb_shift_latched))
+			kb_lit_until[i] = now + KB_LIT_MS;
+		lit = (Sint32)(kb_lit_until[i] - now) > 0;
+		if (lit == kb_lit[i]) continue;
+		kb_lit[i] = lit;
+		kr.g_x = work.g_x + kb_keys[kb_machine][i][0];
+		kr.g_y = work.g_y + kb_keys[kb_machine][i][1];
+		kr.g_w = kb_keys[kb_machine][i][2];
+		kr.g_h = kb_keys[kb_machine][i][3];
+		kb_draw(&kr);
+	}
+}
+
 /* On exit: returns the handle of the top window if it is one of ours,
  * else -1 */
 static short our_top_window(void) {
 	short top, dummy;
 
-	if (kb_handle < 0 && ab_handle < 0) return -1;
+	if (kb_handle < 0 && ab_handle < 0 && !hw_is_open()) return -1;
 	wind_get(0, WF_TOP, &top, &dummy, &dummy, &dummy);
 	return top;
 }
@@ -808,25 +1054,31 @@ static const char *const ab_glyphs[4][AB_GLYPH_H] = {
 #define AB_NAME_W ((4 * AB_GLYPH_W + 3 * 2) * AB_QUAD)
 #define AB_NAME_H (AB_GLYPH_H * AB_QUAD)
 
-/* An empty line is half a line high */
-static const char *const ab_lines[] = {
-	"Version " VERSION,
-	"ST version " ATARI_VERSION,
-	"",
-	"sz81 by Thunor and Chris Young,",
-	VERSION " updates by ikjordan,",
-	"based on z81 by Russell Marks.",
-	"ZX80 emulation and keyboard images",
-	"from EightyOne by Michael D Wynne.",
-	"",
-	"ST port by Mia Jaap (mia-jaap.de)",
-};
-#define AB_NLINES ((int)(sizeof(ab_lines) / sizeof(*ab_lines)))
+/* The lines are free strings FS_AB_LINE0.. of SZ81.RSC, the first two
+ * followed by the version numbers, the fifth after the sz81 version. An
+ * empty line is half a line high */
+#define AB_NLINES 10
+static char ab_text[AB_NLINES][80];
+static char *ab_lines[AB_NLINES];
+
+static void ab_texts(void) {
+	int i;
+
+	for (i = 0; i < AB_NLINES; i++) {
+		const char *t = rs(FS_AB_LINE0 + i);
+
+		if (i == 0) snprintf(ab_text[i], sizeof(ab_text[i]), "%s%s", t, VERSION);
+		else if (i == 1) snprintf(ab_text[i], sizeof(ab_text[i]), "%s%s", t, ATARI_VERSION);
+		else if (i == 4) snprintf(ab_text[i], sizeof(ab_text[i]), "%s%s", VERSION, t);
+		else snprintf(ab_text[i], sizeof(ab_text[i]), "%s", t);
+		ab_lines[i] = ab_text[i];
+	}
+}
+
 
 enum { AB_ROOT, AB_LINE0, AB_OK = AB_LINE0 + AB_NLINES, AB_COUNT };
 
 static OBJECT ab_tree[AB_COUNT];
-static char ab_ok_text[] = "OK";
 static short ab_handle = -1;
 static int ab_w, ab_h, ab_words, ab_npens;
 static short ab_pen[AB_MAX_PENS];
@@ -1014,7 +1266,7 @@ static void ab_layout(void) {
 	}
 	ab_obj(AB_OK, AB_ROOT, G_BUTTON, OF_SELECTABLE | OF_DEFAULT | OF_EXIT | OF_LASTOB,
 		w - AB_MARGIN - bw, h - AB_MARGIN / 2 - bh, bw, bh);
-	ab_tree[AB_OK].ob_spec.free_string = ab_ok_text;
+	ab_tree[AB_OK].ob_spec.free_string = rs(FS_AB_OK);
 }
 
 static void ab_draw(const GRECT *area) {
@@ -1084,19 +1336,19 @@ static void ab_open(void) {
 	}
 	if (!vdi_open()) return;
 	if (!ab_load()) {
-		form_alert(1, "[3][Cannot load the picture|" PACKAGE_DATA_DIR
-			"\\zx81.bmp.][  OK  ]");
+		rs_alert(AL_NOABPIC);
 		return;
 	}
+	ab_texts();
 	ab_layout();
 
 	wind_get_grect(0, WF_WORKXYWH, &desk);
 	if ((ab_handle = wind_create_grect(NAME | CLOSER | MOVER, &desk)) < 0) {
 		ab_free();
-		form_alert(1, "[3][No more windows available.][  OK  ]");
+		rs_alert(AL_NOWINDOW);
 		return;
 	}
-	wind_set_str(ab_handle, WF_NAME, " About sz81 ");
+	wind_set_str(ab_handle, WF_NAME, rs(FS_AB_TITLE));
 	outer.g_x = outer.g_y = 0;
 	outer.g_w = ab_tree[AB_ROOT].ob_width;
 	outer.g_h = ab_tree[AB_ROOT].ob_height;
@@ -1132,19 +1384,310 @@ static void ab_poll(void) {
 }
 
 /***************************************************************************
+ * Hardware dialog (Options > Hardware...)                                 *
+ ***************************************************************************/
+/* The settings of the first page of sz81's own options (F2) in a CF-Lib
+ * window dialog, tree T_HARDWARE of SZ81.RSC. hw_layout() sets the rows in
+ * pixels so that buttons are at least 17 pixels high. Object 1 is a MagiC
+ * title, which CF-Lib makes the window name; fix_dial() turns the MagiC
+ * objects into user objects where the AES lacks them. RAM size, frameskip
+ * and speed are popups (handle_popup) whose entries are in the order of
+ * hw_ram_sizes, 0..MAX_FRAMESKIP and 200/100/66/50%; a click on a label
+ * steps to the next entry.
+ *
+ * SDL's GEM driver owns evnt_multi, so the dialog is fed by hand: window
+ * messages from gem_message, keys from the IKBD hook (ikbd_pump queues
+ * them while the dialog is on top), clicks by polling graf_mkstate.
+ * OK applies the settings as sz81's own Save does; a new machine, RAM
+ * size or M1NOT resets the emulated machine, so OK asks first. */
+
+#define HW_RAM_N 10
+#define HW_KEYS 16
+
+static const int hw_ram_sizes[HW_RAM_N] = { 1, 2, 3, 4, 16, 24, 32, 40, 48, 56 };
+
+static OBJECT *hw_tree, *hw_ram_pop, *hw_fskip_pop, *hw_speed_pop;
+static WDIALOG *hw_wd;
+static int hw_keys[HW_KEYS], hw_nkeys;	/* keys typed while it is on top */
+static short hw_kstate, hw_mb_prev;
+
+/* After rsrc_load the y of an object in a frame is its row (1 = first)
+ * times the character height; this gives the rows and frames their pixels
+ * and puts the buttons in a row below the frames */
+static void hw_layout(void) {
+	short bh = gl_hchar + 2 < 17 ? 17 : gl_hchar + 2;		/* button height */
+	short rh = bh + (gl_hchar >= 16 ? gl_hchar / 4 : 1);	/* row */
+	short ft = gl_hchar + gl_hchar / 4;						/* frame title */
+	short gap = gl_hchar / 2;
+	short y, i, o, rows, h;
+	OBJECT *t = hw_tree;
+
+	t[HW_TITLE].ob_x = gl_wchar;
+	t[HW_TITLE].ob_y = gl_hchar;
+	t[HW_TITLE].ob_width = t[ROOT].ob_width - 2 * gl_wchar;
+	t[HW_TITLE].ob_height = gl_hchar + 2;
+	y = t[HW_TITLE].ob_y + t[HW_TITLE].ob_height + gl_hchar;
+
+	for (i = t[ROOT].ob_head; i != ROOT; i = t[i].ob_next) {
+		if (t[i].ob_head < 0) continue;
+		rows = 0;
+		for (o = t[i].ob_head; o != i; o = t[o].ob_next) {
+			short row = t[o].ob_y / gl_hchar - 1;
+
+			if (row + 1 > rows) rows = row + 1;
+			h = (t[o].ob_type & 0xFF) == G_BUTTON ? bh : gl_hchar;
+			t[o].ob_y = ft + row * rh + (rh - h) / 2;
+			t[o].ob_height = h;
+		}
+		t[i].ob_y = y;
+		t[i].ob_height = ft + rows * rh + 2;
+		y += t[i].ob_height + gap;
+	}
+	y += gap;
+	t[HW_CANCEL].ob_y = t[HW_OK].ob_y = y;
+	t[HW_CANCEL].ob_height = t[HW_OK].ob_height = bh;
+	t[ROOT].ob_height = y + bh + gl_hchar;
+}
+
+static void hw_build(void) {
+	rsrc_gaddr(R_TREE, T_HARDWARE, &hw_tree);
+	rsrc_gaddr(R_TREE, T_RAMPOP, &hw_ram_pop);
+	rsrc_gaddr(R_TREE, T_FSKIPPOP, &hw_fskip_pop);
+	rsrc_gaddr(R_TREE, T_SPEEDPOP, &hw_speed_pop);
+	hw_layout();
+	fix_dial(hw_tree);
+	fix_popup(hw_ram_pop, 1);
+	fix_popup(hw_fskip_pop, 1);
+	fix_popup(hw_speed_pop, 1);
+}
+
+/* On exit: returns the number of entries of a popup */
+static int hw_entries(OBJECT *pop) {
+	int i, n = 0;
+
+	for (i = pop[ROOT].ob_head; i != ROOT && i >= 0; i = pop[i].ob_next) n++;
+	return n;
+}
+
+/* The box shows entry n of its popup (limited to the entries there are) */
+static void hw_show(int box, OBJECT *pop, int n) {
+	char s[32];
+	int last = hw_entries(pop) - 1;
+
+	get_string(pop, pop[ROOT].ob_head + (n < 0 ? 0 : n > last ? last : n), s);
+	set_string(hw_tree, box, s);
+}
+
+/* The entry of a popup that its box shows */
+static int hw_choice(int box, OBJECT *pop) {
+	char s[16], t[16];
+	int i;
+
+	get_string(hw_tree, box, s);
+	for (i = pop[ROOT].ob_head; i != ROOT && i >= 0; i = pop[i].ob_next) {
+		get_string(pop, i, t);
+		if (!strcmp(s, t)) return i - pop[ROOT].ob_head;
+	}
+	return 0;
+}
+
+static void hw_radio(int first, int n, int on) {
+	int i;
+
+	for (i = 0; i < n; i++)
+		set_state(hw_tree, first + i, OS_SELECTED, i == on);
+}
+
+static int hw_radio_get(int first, int n) {
+	int i;
+
+	for (i = 0; i < n; i++)
+		if (get_state(hw_tree, first + i, OS_SELECTED)) return i;
+	return 0;
+}
+
+/* The dialog shows the current settings; zx80 is 0 = ZX81, 1 = ZX80 4K,
+ * 2 = ZX80 8K and the radios are ZX80 4K, ZX80 8K, ZX81 */
+static void hw_fill(void) {
+	int i, ram = 4;
+
+	hw_radio(HW_ZX80, 3, *sdl_emulator.model == MODEL_ZX81 ? 2 :
+		*sdl_emulator.model == MODEL_ZX80_8K ? 1 : 0);
+	for (i = 0; i < HW_RAM_N; i++)
+		if (hw_ram_sizes[i] == sdl_emulator.ramsize) ram = i;
+	hw_show(HW_RAM, hw_ram_pop, ram);
+	set_state(hw_tree, HW_M1NOT, OS_SELECTED, sdl_emulator.m1not != 0);
+	hw_show(HW_FSKIP, hw_fskip_pop, sdl_emulator.frameskip);
+	hw_show(HW_SPEED, hw_speed_pop, sdl_emulator.speed / 10 - 1);
+	set_state(hw_tree, HW_WRX, OS_SELECTED, sdl_emulator.wrx != HIRESDISABLED);
+	hw_radio(HW_UDGNONE, 3, sdl_emulator.chrgen == CHRGENQS ? 1 :
+		sdl_emulator.chrgen == CHRGENCHR16 ? 2 : 0);
+}
+
+/* OK: like sz81's Save on its options pages
+ * On exit: returns TRUE if the settings were taken */
+static int hw_apply(void) {
+	static const int models[3] = { MODEL_ZX80, MODEL_ZX80_8K, MODEL_ZX81 };
+	static const int chrgens[3] = { CHRGENSINCLAIR, CHRGENQS, CHRGENCHR16 };
+	int model, ram, m1not, fskip, speed, wrx, chrgen, comp;
+
+	/* sz81's own dialogs keep copies of these settings */
+	comp = get_active_component();
+	if (comp != COMP_VKEYB && comp != COMP_CTB && comp != COMP_EMU) {
+		rs_alert(AL_SZ81DIALOG);
+		ikbd_resync();
+		return FALSE;
+	}
+
+	model = models[hw_radio_get(HW_ZX80, 3)];
+	ram = hw_ram_sizes[hw_choice(HW_RAM, hw_ram_pop)];
+	m1not = get_state(hw_tree, HW_M1NOT, OS_SELECTED) ? 1 : 0;
+	fskip = hw_choice(HW_FSKIP, hw_fskip_pop);
+	speed = (hw_choice(HW_SPEED, hw_speed_pop) + 1) * 10;
+	wrx = get_state(hw_tree, HW_WRX, OS_SELECTED) ? HIRESWRX : HIRESDISABLED;
+	chrgen = chrgens[hw_radio_get(HW_UDGNONE, 3)];
+
+	if (model != *sdl_emulator.model || ram != sdl_emulator.ramsize ||
+		m1not != sdl_emulator.m1not) {
+		int answer = rs_alert(AL_HWRESET);
+
+		ikbd_resync();
+		if (answer != 2) return FALSE;
+	}
+
+	/* sz81's component executive notices the changes and resets the
+	 * machine or switches the graphics */
+	*sdl_emulator.model = model;
+	sdl_emulator.ramsize = ram;
+	sdl_emulator.m1not = m1not;
+	sdl_emulator.frameskip = fskip;
+	sdl_emulator.wrx = wrx;
+	sdl_emulator.chrgen = chrgen;
+	if (speed != sdl_emulator.speed) {
+		sdl_emulator.speed = speed;
+		if (sdl_sound.state) sound_framesiz_init();
+	}
+	rcfile.rewrite = TRUE;
+	return TRUE;
+}
+
+/* CF-Lib calls this for exit and touchexit objects, the Undo key and the
+ * closer. On exit: returns TRUE to close the dialog */
+static int hw_exit(WDIALOG *wd, short obj) {
+	obj &= 0x7FFF;		/* bit 15: double click */
+	switch (obj) {
+		case HW_RAM:
+		case HW_RAMLBL:
+			handle_popup(hw_tree, HW_RAM, hw_ram_pop, ROOT, obj == HW_RAM ? POP_OPEN : POP_CYCLE);
+			return FALSE;
+		case HW_FSKIP:
+		case HW_FSKLBL:
+			handle_popup(hw_tree, HW_FSKIP, hw_fskip_pop, ROOT, obj == HW_FSKIP ? POP_OPEN : POP_CYCLE);
+			return FALSE;
+		case HW_SPEED:
+		case HW_SPDLBL:
+			handle_popup(hw_tree, HW_SPEED, hw_speed_pop, ROOT, obj == HW_SPEED ? POP_OPEN : POP_CYCLE);
+			return FALSE;
+		case HW_OK:
+			if (hw_apply()) return TRUE;
+			set_state(hw_tree, HW_OK, OS_SELECTED, FALSE);
+			redraw_wdobj(wd, HW_OK);
+			return FALSE;
+		default:		/* Cancel, Undo, Escape, the closer */
+			return TRUE;
+	}
+}
+
+static int hw_is_open(void) {
+	return hw_wd != NULL && (hw_wd->mode & WD_OPEN);
+}
+
+static void hw_open(void) {
+	static int built;
+
+	if (hw_is_open()) {
+		wind_set(hw_wd->win_handle, WF_TOP, 0, 0, 0, 0);
+		return;
+	}
+	if (!built) {
+		hw_build();
+		built = TRUE;
+	}
+	if (!hw_wd && !(hw_wd = create_wdial(hw_tree, NULL, 0, WOCB_NULL, hw_exit))) {
+		rs_alert(AL_NOMEM);
+		return;
+	}
+	hw_fill();
+	hw_nkeys = 0;
+	hw_mb_prev = 1;		/* the button that chose the menu entry */
+	/* Centred the first time, then where it was */
+	open_wdial(hw_wd, -1, -1);
+	if (hw_wd->win_handle <= 0)
+		rs_alert(AL_NOWINDOW);
+}
+
+static void hw_close(void) {
+	if (!hw_wd) return;
+	close_wdial(hw_wd);
+	delete_wdial(hw_wd);
+	hw_wd = NULL;
+}
+
+/* From ikbd_pump while the dialog is on top */
+static void hw_key(int sc, const unsigned char *down) {
+	if (hw_nkeys >= HW_KEYS) return;
+	hw_kstate = (down[SC_LSHIFT] ? K_LSHIFT : 0) | (down[SC_RSHIFT] ? K_RSHIFT : 0)
+		| (down[SC_CTRL] ? K_CTRL : 0) | (down[SC_ALT] ? K_ALT : 0);
+	hw_keys[hw_nkeys++] = sc;
+}
+
+/* Every frame: the keys typed into the dialog and a mouse click on it.
+ * Keys go to CF-Lib as the AES reports them, scan code and ASCII; Escape
+ * acts as Undo (Cancel), Enter as Return */
+static void hw_poll(void) {
+	static _KEYTAB *keytab;
+	short mx, my, mb, ks, top;
+	int i, sc, key;
+
+	if (!hw_is_open()) {
+		hw_nkeys = 0;
+		return;
+	}
+	if (!keytab) keytab = (_KEYTAB *)Keytbl((void *)-1, (void *)-1, (void *)-1);
+	for (i = 0; i < hw_nkeys && hw_is_open(); i++) {
+		sc = hw_keys[i];
+		if (sc == SC_ESC) {
+			key = 0x6100;
+		} else if (sc == SC_ENTER || sc == SC_RETURN) {
+			key = 0x1c0d;
+		} else {
+			key = (sc << 8) | (unsigned char)
+				((hw_kstate & (K_LSHIFT | K_RSHIFT)) ? keytab->shift : keytab->unshift)[sc];
+		}
+		key_wdial(key, hw_kstate);
+	}
+	hw_nkeys = 0;
+	if (!hw_is_open()) return;
+
+	graf_mkstate(&mx, &my, &mb, &ks);
+	if ((mb & 1) && !(hw_mb_prev & 1)) {
+		top = our_top_window();
+		if (top == hw_wd->win_handle && wind_find(mx, my) == top) {
+			wind_update(BEG_MCTRL);
+			click_wdial(1, mx, my, ks, 1);
+			wind_update(END_MCTRL);
+			ikbd_resync();
+			graf_mkstate(&mx, &my, &mb, &ks);
+		}
+	}
+	hw_mb_prev = mb;
+}
+
+/***************************************************************************
  * Menu bar                                                                *
  ***************************************************************************/
 
-enum {
-	M_ROOT, M_BAR, M_ACTIVE, M_T_DESK, M_T_FILE, M_T_VIEW, M_SCREEN,
-	M_DESKBOX, M_ABOUT, M_DESKSEP, M_ACC1, M_ACC2, M_ACC3, M_ACC4, M_ACC5, M_ACC6,
-	M_FILEBOX, M_OPEN, M_FILESEP1, M_LOADSTATE, M_SAVESTATE, M_FILESEP2,
-	M_SCREENSHOT, M_FILESEP3, M_RESET, M_QUIT,
-	M_VIEWBOX, M_INVERT, M_KEYBOARD,
-	M_COUNT
-};
-
-static OBJECT menu[M_COUNT];
+static OBJECT *menu;		/* tree T_MENU of SZ81.RSC */
 static int menu_shown;
 
 /* Only in our SDL build (see the top of this file); weak so that sz81 still
@@ -1163,100 +1706,13 @@ static const struct {
 	{ SDLK_k, M_KEYBOARD },
 };
 
-#define DESK_W 21
-#define FILE_W 22
-#define VIEW_W 16
-
-static char s_t_desk[] = " sz81 ";
-static char s_t_file[] = " File ";
-static char s_t_view[] = " View ";
-static char s_about[DESK_W + 1], s_desksep[DESK_W + 1], s_acc[6][DESK_W + 1];
-static char s_open[FILE_W + 1], s_screenshot[FILE_W + 1], s_quit[FILE_W + 1];
-static char s_loadstate[FILE_W + 1], s_savestate[FILE_W + 1], s_reset[FILE_W + 1];
-static char s_filesep[FILE_W + 1];
-static char s_invert[VIEW_W + 1], s_keyboard[VIEW_W + 1];
-
-static void menu_obj(int i, int next, int head, int tail, int type, int state,
-	long spec, int x, int y, int w, int h) {
-	menu[i].ob_next = next;
-	menu[i].ob_head = head;
-	menu[i].ob_tail = tail;
-	menu[i].ob_type = type;
-	menu[i].ob_flags = OF_NONE;
-	menu[i].ob_state = state;
-	menu[i].ob_spec.index = spec;
-	menu[i].ob_x = x;
-	menu[i].ob_y = y;
-	menu[i].ob_width = w;
-	menu[i].ob_height = h;
-}
-
-/* A menu entry: two spaces for the check mark, the text, the shortcut at
- * the right edge */
-static void menu_item(int i, int next, char *s, int w, int y, const char *text,
-	const char *key) {
-	sprintf(s, "  %-*s%s ", w - 3 - (int)strlen(key), text, key);
-	menu_obj(i, next, -1, -1, G_STRING, OS_NORMAL, 0, 0, y, w, 1);
-	menu[i].ob_spec.free_string = s;
-}
-
-static void menu_separator(int i, int next, char *s, int w, int y) {
-	memset(s, '-', w);
-	s[w] = 0;
-	menu_obj(i, next, -1, -1, G_STRING, OS_DISABLED, 0, 0, y, w, 1);
-	menu[i].ob_spec.free_string = s;
-}
-
-static void menu_title(int i, int next, char *s, int x) {
-	menu_obj(i, next, -1, -1, G_TITLE, OS_NORMAL, 0L, x, 0, strlen(s), 0x0301);
-	menu[i].ob_spec.free_string = s;
-}
-
-/* Sizes are in characters as in a resource file (low byte characters, high
- * byte extra pixels); rsrc_obfix turns them into pixels */
+/* The bar spans the whole screen */
 static void menu_build(void) {
 	short x, y, w, h;
-	char name[24];
-	int i;
 
-	menu_obj(M_ROOT, -1, M_BAR, M_SCREEN, G_IBOX, OS_NORMAL, 0L, 0, 0, 80, 25);
-	menu_obj(M_BAR, M_SCREEN, M_ACTIVE, M_ACTIVE, G_BOX, OS_NORMAL, 0x00001100L, 0, 0, 80, 0x0201);
-	menu_obj(M_ACTIVE, M_BAR, M_T_DESK, M_T_VIEW, G_IBOX, OS_NORMAL, 0L, 2, 0, 18, 0x0301);
-	menu_title(M_T_DESK, M_T_FILE, s_t_desk, 0);
-	menu_title(M_T_FILE, M_T_VIEW, s_t_file, 6);
-	menu_title(M_T_VIEW, M_ACTIVE, s_t_view, 12);
-	menu_obj(M_SCREEN, M_ROOT, M_DESKBOX, M_VIEWBOX, G_IBOX, OS_NORMAL, 0L, 0, 0x0301, 80, 19);
-
-	menu_obj(M_DESKBOX, M_FILEBOX, M_ABOUT, M_ACC6, G_BOX, OS_NORMAL, 0x00FF1100L, 2, 0, DESK_W, 8);
-	menu_item(M_ABOUT, M_DESKSEP, s_about, DESK_W, 0, "About sz81...", "");
-	menu_separator(M_DESKSEP, M_ACC1, s_desksep, DESK_W, 1);
-	for (i = 0; i < 6; i++) {
-		sprintf(name, "Desk Accessory %d", i + 1);
-		menu_item(M_ACC1 + i, i < 5 ? M_ACC1 + i + 1 : M_DESKBOX, s_acc[i], DESK_W, 2 + i, name, "");
-	}
-
-	menu_obj(M_FILEBOX, M_VIEWBOX, M_OPEN, M_QUIT, G_BOX, OS_NORMAL, 0x00FF1100L, 8, 0, FILE_W, 9);
-	menu_item(M_OPEN, M_FILESEP1, s_open, FILE_W, 0, "Open...", "^O");
-	menu_separator(M_FILESEP1, M_LOADSTATE, s_filesep, FILE_W, 1);
-	menu_item(M_LOADSTATE, M_SAVESTATE, s_loadstate, FILE_W, 2, "Load State...", "");
-	menu_item(M_SAVESTATE, M_FILESEP2, s_savestate, FILE_W, 3, "Save State...", "");
-	menu_separator(M_FILESEP2, M_SCREENSHOT, s_filesep, FILE_W, 4);
-	menu_item(M_SCREENSHOT, M_FILESEP3, s_screenshot, FILE_W, 5, "Save screenshot", "^T");
-	menu_separator(M_FILESEP3, M_RESET, s_filesep, FILE_W, 6);
-	menu_item(M_RESET, M_QUIT, s_reset, FILE_W, 7, "Reset...", "");
-	menu_item(M_QUIT, M_FILEBOX, s_quit, FILE_W, 8, "Quit", "^Q");
-
-	menu_obj(M_VIEWBOX, M_SCREEN, M_INVERT, M_KEYBOARD, G_BOX, OS_NORMAL, 0x00FF1100L, 14, 0, VIEW_W, 2);
-	menu_item(M_INVERT, M_KEYBOARD, s_invert, VIEW_W, 0, "Invert", "");
-	menu_item(M_KEYBOARD, M_VIEWBOX, s_keyboard, VIEW_W, 1, "Keyboard", "^K");
-	menu[M_KEYBOARD].ob_flags |= OF_LASTOB;
-
-	for (i = 0; i < M_COUNT; i++)
-		rsrc_obfix(menu, i);
-
-	/* The bar spans the whole screen */
+	rsrc_gaddr(R_TREE, T_MENU, &menu);
 	wind_get(0, WF_CURRXYWH, &x, &y, &w, &h);
-	menu[M_ROOT].ob_width = menu[M_BAR].ob_width = menu[M_SCREEN].ob_width = x + w;
+	menu[ROOT].ob_width = menu[M_BAR].ob_width = menu[M_SCREEN].ob_width = x + w;
 }
 
 static void menu_hide(void) {
@@ -1276,12 +1732,15 @@ static int gem_message(const short *message) {
 		return TRUE;
 	}
 	return window_message(message, kb_handle, kb_draw, kb_close)
-		|| window_message(message, ab_handle, ab_draw, ab_close);
+		|| window_message(message, ab_handle, ab_draw, ab_close)
+		|| (hw_wd && message_wdial((short *)message));
 }
 
 /* On exit: returns TRUE if Control and this key are a menu shortcut */
 static int menu_shortcut(int sc) {
 	int i;
+
+	if (!menu) return FALSE;
 
 	for (i = 0; i < (int)(sizeof(shortcuts) / sizeof(*shortcuts)); i++) {
 		if (scan_sym[sc] == shortcuts[i].key) {
@@ -1335,8 +1794,7 @@ static void menu_do(int item) {
 				get_active_component() != COMP_CTB &&
 				get_active_component() != COMP_EMU)
 				break;
-			if (form_alert(1, "[2][Reset the emulated machine?|"
-				"The program in memory is lost.][Cancel|Reset]") == 2)
+			if (rs_alert(AL_RESET) == 2)
 				emulator_reset();
 			ikbd_resync();
 			break;
@@ -1351,6 +1809,9 @@ static void menu_do(int item) {
 			sdl_emulator.invert = !sdl_emulator.invert;
 			rcfile.rewrite = TRUE;
 			refresh_screen = 1;
+			break;
+		case M_HARDWARE:
+			hw_open();
 			break;
 		case M_KEYBOARD:
 			if (kb_handle >= 0) kb_close();
@@ -1377,6 +1838,18 @@ static void update_title(void) {
 	SDL_WM_SetCaption(title, "sz81");
 }
 
+static int cf_inited;
+
+/* Called after SDL_Quit: undoes init_app and our rsrc_load. A counting AES
+ * (MyAES) would otherwise report sz81 as killed, still registered once */
+void atari_gem_exit(void) {
+	if (!cf_inited) return;
+	cf_inited = FALSE;
+	if (rsc_loaded) rsrc_free();
+	rsc_loaded = FALSE;
+	exit_gem();	/* CF-Lib's VDI workstation, user objects, appl_exit */
+}
+
 void atari_poll(void) {
 	static int state = -1;	/* -1 = first call, 0 = nothing to do, 1 = GEM */
 	int item;
@@ -1384,14 +1857,22 @@ void atari_poll(void) {
 	if (state < 0) {
 		state = atari_gem_driver();
 		if (state) {
+			/* CF-Lib's globals, VDI workstation and user objects. This is
+			 * a second appl_init after SDL's: atari_gem_exit balances it */
+			init_app(NULL);
+			cf_inited = TRUE;
+			rsc_loaded = rsrc_load("sz81.rsc") != 0;
+			if (!rsc_loaded)
+				form_alert(1, "[3][sz81.rsc is missing. It belongs|"
+					"next to the program. sz81 runs|without its menu bar.][  OK  ]");
 			/* Under a multitasking AES: our name in the application list,
 			 * and AP_TERM is understood (SDL's GEM driver quits on it) */
 			if (_AESnumapps != 1)
-				menu_register(gl_apid, "  sz81 Emulator");
+				menu_register(gl_apid, rsc_loaded ? rs(FS_APPNAME) : "  sz81 Emulator");
 			if (_AESversion >= 0x400)
 				shel_write(SWM_NEWMSG, NM_APTERM, 0, NULL, NULL);
 		}
-		if (state && SDL_AtariGem_SetMessageHook) {
+		if (state && rsc_loaded && SDL_AtariGem_SetMessageHook) {
 			menu_build();
 			if (menu_bar(menu, MENU_INSTALL) > 0) {
 				menu_shown = TRUE;
@@ -1406,7 +1887,9 @@ void atari_poll(void) {
 
 	if (hook_active) ikbd_pump();
 	kb_check_machine();
+	kb_poll();
 	ab_poll();
+	hw_poll();
 	update_title();
 	menu_update_checks();
 
@@ -1600,4 +2083,68 @@ void atari_audio_diagnose(void) {
 			lock == SNDLOCKED ? "another program is using the sound, "
 			"quit it and choose the sound device again" : "no XBIOS sound");
 	}
+}
+
+/***************************************************************************
+ * Palettes                                                                *
+ ***************************************************************************/
+/* A palette file holds two RGB values written 0xRRGGBB, paper first, then
+ * ink; anything else in the file is ignored. Returns TRUE if both were found */
+
+static int pal_read(const char *filename, Uint32 rgb[2]) {
+	FILE *fp;
+	char line[256], *p;
+	int n = 0, i, d;
+	Uint32 v;
+
+	if ((fp = fopen(filename, "r")) == NULL) return FALSE;
+	while (n < 2 && fgets(line, sizeof(line), fp)) {
+		for (p = line; n < 2 && (p = strstr(p, "0x")) != NULL; ) {
+			p += 2;
+			for (v = 0, i = 0; i < 6; i++, p++) {
+				if (*p >= '0' && *p <= '9') d = *p - '0';
+				else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
+				else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
+				else break;
+				v = v << 4 | d;
+			}
+			if (i == 6) rgb[n++] = v;
+		}
+	}
+	fclose(fp);
+	return n == 2;
+}
+
+/* Loads palettes/<program name>.pal from sz81's folder, else
+ * palettes/default.pal, else the built-in ZX80/81 colours. program is the
+ * loaded file's path, or NULL at startup */
+void atari_palette_load(const char *program) {
+	static const Uint32 zx[2] = {0xf0f0e8, 0x202018};
+	char filename[512], *e;
+	const char *b;
+	Uint32 rgb[2];
+	int l;
+
+	strcpy(filename, startdir);
+	strcatdelimiter(filename);
+	strcat(filename, "palettes");
+	strcatdelimiter(filename);
+	l = strlen(filename);
+	if (program != NULL) {
+		b = strrchr(program, '/');
+		if (strrchr(program, '\\') > b) b = strrchr(program, '\\');
+		b = b ? b + 1 : program;
+		if (l + strlen(b) + 5 < sizeof(filename)) {
+			strcpy(filename + l, b);
+			if ((e = strrchr(filename + l, '.')) != NULL) *e = 0;
+			strcat(filename, ".pal");
+			if (pal_read(filename, rgb)) goto found;
+		}
+	}
+	strcpy(filename + l, "default.pal");
+	if (!pal_read(filename, rgb)) memcpy(rgb, zx, sizeof(rgb));
+found:
+	colours.emu_bg = rgb[0];
+	colours.emu_fg = rgb[1];
+	video.redraw = TRUE;
 }

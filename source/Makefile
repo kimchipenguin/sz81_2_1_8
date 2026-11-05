@@ -1,3 +1,5 @@
+# Run in the source folder; the binary goes to the project root above it.
+
 # Comment/uncomment these to choose an installation destination
 # System wide installation
 #PREFIX?=/usr/local
@@ -42,9 +44,9 @@ LDFLAGS=
 LIBS=`$(SDL_CONFIG) --libs` 
 
 # You won't need to alter anything below
-all: $(SOURCES) $(TARGET)
+all: $(SOURCES) ../$(TARGET)
 
-$(TARGET): $(OBJECTS)
+../$(TARGET): $(OBJECTS)
 	$(LINK) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@
 
 %.o: %.c
@@ -55,8 +57,8 @@ $(TARGET): $(OBJECTS)
 open%:
 	-@if [ -n "`which pasmo 2> /dev/null`" ]; then \
 		pasmo -v open8x/$@.asm open8x/$@.rom; \
-		if [ -f open8x/$@.rom -a ! -e data/zx$*.rom ]; then \
-			cp open8x/$@.rom data/zx$*.rom; \
+		if [ -f open8x/$@.rom -a ! -e ../data/zx$*.rom ]; then \
+			cp open8x/$@.rom ../data/zx$*.rom; \
 		fi \
 	else \
 		echo "The Pasmo cross-assembler was not found: skipping $@"; \
@@ -73,11 +75,11 @@ install:
 	mkdir -p $(BINDIR)
 	mkdir -p $(DOCDIR)
 	mkdir -p $(PACKAGE_DATA_DIR)
-	cp $(TARGET) $(BINDIR)
-	cp AUTHORS COPYING ChangeLog NEWS README $(DOCDIR)
-	cp data/*.bmp $(PACKAGE_DATA_DIR)
-	@if [ -f data/zx80.rom ]; then cp data/zx80.rom $(PACKAGE_DATA_DIR); fi
-	@if [ -f data/zx81.rom ]; then cp data/zx81.rom $(PACKAGE_DATA_DIR); fi
+	cp ../$(TARGET) $(BINDIR)
+	cd .. && cp AUTHORS COPYING ChangeLog NEWS README $(DOCDIR)
+	cp ../data/*.bmp $(PACKAGE_DATA_DIR)
+	@if [ -f ../data/zx80.rom ]; then cp ../data/zx80.rom $(PACKAGE_DATA_DIR); fi
+	@if [ -f ../data/zx81.rom ]; then cp ../data/zx81.rom $(PACKAGE_DATA_DIR); fi
 
 uninstall:
 	@echo "Uninstalling is not currently implemented."

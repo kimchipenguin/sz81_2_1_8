@@ -54,11 +54,11 @@ dkms.conf
 
 # RiscOS
 riscroot
-obj-atari*/
+source/obj-atari*/
 *.tos
-atari/SDL-1.2/
-atari/sdl-build/
-atari/sdl-install/
-atari/usound/
+source/atari/SDL-1.2/
+source/atari/sdl-build/
+source/atari/sdl-install/
+source/atari/usound/
 local/
 dist/

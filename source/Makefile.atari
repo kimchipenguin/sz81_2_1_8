@@ -1,18 +1,22 @@
 # Atari ST/STE/TT/Falcon build using the m68k-atari-mint cross toolchain
 # and the MiNT SDL 1.2 port.
 #
+# Run in the source folder; the binaries, sz81.rsc and dist/ go to the
+# folder above it (the project root), next to data/ and palettes/:
+#
 #   make -f Makefile.atari                 plain 68000 (ST, STE, Mega STE)
 #   make -f Makefile.atari CPU=-m68020-60  68020-68060 with FPU (TT, Falcon)
 #                                          -> sz81_68020-60.app
 #   make -f Makefile.atari CPU=-mcpu=5475  FireBee (ColdFire) -> sz81_v4e.app
 #
-# By default the toolchain's SDL is used. SDL_PREFIX points to a directory
-# holding an SDL build per CPU instead (<SDL_PREFIX>/m68000, .../m68020-60),
-# such as the one atari/build-sdl.sh makes: upstream SDL-1.2 with a patch
-# that lets the menu bar work in a GEM window:
+# SDL_PREFIX points to a directory holding an SDL build per CPU
+# (<SDL_PREFIX>/m68000, .../m68020-60), such as the one atari/build-sdl.sh
+# makes: upstream SDL-1.2 with a patch that lets the menu bar work in a GEM
+# window. It defaults to atari/sdl-install when that exists, else the
+# toolchain's own SDL is used:
 #
 #   atari/build-sdl.sh
-#   make -f Makefile.atari SDL_PREFIX=atari/sdl-install
+#   make -f Makefile.atari
 #
 # The binary runs from the folder holding the data directory.
 
@@ -23,6 +27,10 @@ CPU?=-m68000
 
 PACKAGE_DATA_DIR?=data
 
+# The project root: binaries, resource file and release folder
+ROOT=..
+SDL_PREFIX?=$(wildcard atari/sdl-install)
+
 # For sz81 OSS_SOUND_SUPPORT is now synonymous with SDL_SOUND_SUPPORT.
 # Comment this out if you don't want sound support.
 SOUNDDEF=-DOSS_SOUND_SUPPORT
@@ -30,13 +38,13 @@ SOUNDDEF=-DOSS_SOUND_SUPPORT
 # CPUDIR names the object and SDL directories
 ifeq ($(CPU),-mcpu=5475)
 CPUDIR=m5475
-TARGET=sz81_v4e.app
+TARGET=$(ROOT)/sz81_v4e.app
 else
 CPUDIR=$(patsubst -%,%,$(CPU))
 ifeq ($(CPU),-m68000)
-TARGET=sz81.app
+TARGET=$(ROOT)/sz81.app
 else
-TARGET=sz81$(subst -m,_,$(CPU)).app
+TARGET=$(ROOT)/sz81$(subst -m,_,$(CPU)).app
 endif
 endif
 SOURCES=sdl_main.c common.c sound.c z80.c loadp.c sdl_engine.c sdl_hotspots.c \
@@ -50,7 +58,7 @@ CFLAGS+=-Wall -fcommon -Wno-unused-result -D_GNU_SOURCE=1 -DVERSION=\"$(VERSION)
 	-DPLATFORM_ATARI -DPACKAGE_DATA_DIR=\"$(PACKAGE_DATA_DIR)\" $(SOUNDDEF) -DLOAD_AND_SAVE
 CFLAGS+=$(EXTRA_CFLAGS)
 LDFLAGS=$(CPU)
-LIBS=-lSDL -lgem -lz -lm
+LIBS=-lSDL -lcflib -lgem -lz -lm
 
 ifneq ($(SDL_PREFIX),)
 SDL_DIR=$(SDL_PREFIX)/$(CPUDIR)
@@ -59,7 +67,15 @@ CFLAGS+=-I$(SDL_DIR)/include
 LIBS:=-L$(SDL_DIR)/lib $(LIBS)
 endif
 
-all: $(TARGET)
+all: $(TARGET) $(ROOT)/sz81.rsc
+
+# The GEM resource file (menu bar, Hardware dialog, texts) and its header
+# come from atari/mkrsc.py; both are in the repository. Once sz81.rsc is
+# edited in a resource editor, keep the header in step by hand.
+$(ROOT)/sz81.rsc atari/sz81_rsc.h: atari/mkrsc.py
+	python3 atari/mkrsc.py $(ROOT)/sz81.rsc atari/sz81_rsc.h
+
+$(OBJDIR)/atari.o: atari/sz81_rsc.h
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@
@@ -76,8 +92,8 @@ $(OBJDIR):
 
 # Release folder and zip: all three binaries, the data files sz81 needs and
 # the bundled ZX81 programs, every name 8.3 for TOS file systems
-#   make -f Makefile.atari SDL_PREFIX=atari/sdl-install dist
-DIST=dist/SZ81
+#   make -f Makefile.atari dist
+DIST=$(ROOT)/dist/SZ81
 DATA_FILES=kbzx80.bmp kbzx81.bmp sz81.bmp sz81icon.bmp zx80.rom zx80font.bmp \
 	zx80kybd.bmp zx81.bmp zx81.rom zx81font.bmp zx81kybd.bmp zx82font.bmp
 ATARI_VERSION=$(shell sed -n 's/^\#define ATARI_VERSION "\(.*\)"/\1/p' atari.c)
@@ -86,23 +102,25 @@ dist:
 	$(MAKE) -f Makefile.atari CPU=-m68000
 	$(MAKE) -f Makefile.atari CPU=-m68020-60
 	$(MAKE) -f Makefile.atari CPU=-mcpu=5475
-	rm -rf dist
-	mkdir -p $(DIST)/data $(DIST)/GAMES
-	cp sz81.app $(DIST)/SZ81.APP
-	cp sz81_68020-60.app $(DIST)/SZ81FPU.APP
-	cp sz81_v4e.app $(DIST)/SZ81V4E.APP
-	cp COPYING $(DIST)/COPYING
-	cd data && cp $(DATA_FILES) ../$(DIST)/data/
-	cp games-etc/aydemo.p games-etc/mine81.p games-etc/mine81.txt \
+	rm -rf $(ROOT)/dist
+	mkdir -p $(DIST)/data $(DIST)/GAMES $(DIST)/palettes
+	cp $(ROOT)/sz81.app $(DIST)/SZ81.APP
+	cp $(ROOT)/sz81_68020-60.app $(DIST)/SZ81FPU.APP
+	cp $(ROOT)/sz81_v4e.app $(DIST)/SZ81V4E.APP
+	cp $(ROOT)/sz81.rsc $(DIST)/SZ81.RSC
+	cp $(ROOT)/COPYING $(DIST)/COPYING
+	cp $(ROOT)/palettes/default.pal $(DIST)/palettes/default.pal
+	cp $(addprefix $(ROOT)/data/,$(DATA_FILES)) $(DIST)/data/
+	cd $(ROOT) && cp games-etc/aydemo.p games-etc/mine81.p games-etc/mine81.txt \
 		games-etc/tetris.p games-etc/tetris.txt games-etc/tetris1k.p \
-		games-etc/tetrishr.p $(DIST)/GAMES/
-	cp games-etc/pipepanic/pipepanic.p $(DIST)/GAMES/PIPEPANC.P
-	cp games-etc/pipepanic/pipepanic.txt $(DIST)/GAMES/PIPEPANC.TXT
-	cp games-etc/mctemplate/mctemplate.p $(DIST)/GAMES/MCTEMPL.P
-	cp games-etc/mctemplate/mctemplate.txt $(DIST)/GAMES/MCTEMPL.TXT
-	cd dist && zip -qrX sz81-atari-$(ATARI_VERSION).zip SZ81
+		games-etc/tetrishr.p dist/SZ81/GAMES/
+	cd $(ROOT) && cp games-etc/pipepanic/pipepanic.p dist/SZ81/GAMES/PIPEPANC.P
+	cd $(ROOT) && cp games-etc/pipepanic/pipepanic.txt dist/SZ81/GAMES/PIPEPANC.TXT
+	cd $(ROOT) && cp games-etc/mctemplate/mctemplate.p dist/SZ81/GAMES/MCTEMPL.P
+	cd $(ROOT) && cp games-etc/mctemplate/mctemplate.txt dist/SZ81/GAMES/MCTEMPL.TXT
+	cd $(ROOT)/dist && zip -qrX sz81-atari-$(ATARI_VERSION).zip SZ81
 
 .PHONY: all clean dist
 
 clean:
-	rm -rf obj-atari* sz81*.app sz81*.tos dist
+	rm -rf obj-atari* $(ROOT)/sz81*.app $(ROOT)/sz81*.tos $(ROOT)/dist

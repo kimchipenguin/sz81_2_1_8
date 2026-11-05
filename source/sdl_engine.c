@@ -798,6 +798,10 @@ void clean_up_before_exit(void) {
 	SDL_Quit();
 #endif
 
+	#ifdef PLATFORM_ATARI
+		atari_gem_exit();
+	#endif
+
 	#ifdef __amigaos4__
 		amiga_close_libs();
 	#endif

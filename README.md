@@ -78,6 +78,20 @@ Determines how fast the emulated TV will find vertical lock. The smaller the num
 + "Real time" load and save effects. Select VSYNC sound to hear load and save sounds
 
 # Build and Run
+Everything needed to compile sz81 is in the `source` folder; run `make` there.
+The binaries are written to the project root, next to `data`.
+
+## To build for the Atari
+With the m68k-atari-mint cross toolchain, in `source`:
+
+```
+atari/build-sdl.sh                         # SDL 1.2 with sz81's GEM patch, once
+make -f Makefile.atari                     # 68000: sz81.app
+make -f Makefile.atari CPU=-m68020-60      # TT/Falcon: sz81_68020-60.app
+make -f Makefile.atari CPU=-mcpu=5475      # FireBee: sz81_v4e.app
+make -f Makefile.atari dist                # all three + release zip in dist/
+```
+
 ## To run on Pi
 sz81 uses SDL1.2. The latest Raspberry Pi OS (bookworm) defaults to Wayland for Pi4 and Pi5. When SDL1.2 is used with wayland the resize flag is not respected. This means that the sz81 window can be resized by the user, even though the underlying code does not support this. The following can prevent the resize:
 
@@ -95,7 +109,7 @@ Modify the symlink `libSDL.so` at:
 
 ### Pre-requisites
 
-1. The script `mkrisc.sh` creates a directory tree under `riscroot` that can be copied to Risc OS to compile
+1. The script `source/mkrisc.sh` (run it in `source`) creates a directory tree under `riscroot` that can be copied to Risc OS to compile
 
 2. In RiscOS install `GCC4` and `Make` from `!Packman`
 `GCC4` requires more than the default memory to compile. Use TaskManager to increase the next slot to 32MB. After doing this, launch a new TaskWindow (Control F12). `GCC4` will have enough memory to run in that TaskWindow

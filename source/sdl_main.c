@@ -799,6 +799,10 @@ int main(int argc, char *argv[]) {
 				/* Read the project's rcfile if it exists and update
 				 * variables that are defined within it */
 				sdl_rcfile_read();
+#ifdef PLATFORM_ATARI
+				/* palettes/default.pal or the built-in colours */
+				atari_palette_load(NULL);
+#endif
 
 				/* Initialise the hotspots now (this will set the
 				 * default initial vkeyb hotspot for the model) */

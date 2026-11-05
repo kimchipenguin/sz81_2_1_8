@@ -19,6 +19,9 @@
 #include "sdl_engine.h"
 #include "common.h"
 #include "loadp.h"
+#ifdef PLATFORM_ATARI
+#include "atari.h"
+#endif
 
 /* Error macros */
 #define ERROR_D() mem[16384] = 12;
@@ -1031,6 +1034,11 @@ int sdl_load_file(int parameter, int method) {
 		}
         else
         {
+#ifdef PLATFORM_ATARI
+            /* A palette file may come with the program */
+            if (method != LOAD_FILE_METHOD_STATELOAD)
+                atari_palette_load(fullpath);
+#endif
             if (repeat && rom_patches.load.use_rom)
             {
                 loadPInitialise(fullpath, parameter, *sdl_emulator.model == MODEL_ZX80);
