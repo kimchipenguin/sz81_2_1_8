@@ -795,12 +795,11 @@ void clean_up_before_exit(void) {
 
 	if (wm_icon) SDL_FreeSurface(wm_icon);
 
+	#ifdef PLATFORM_ATARI
+		atari_gem_exit();	/* CF-Lib's part, before SDL's appl_exit */
+	#endif
 	SDL_Quit();
 #endif
-
-	#ifdef PLATFORM_ATARI
-		atari_gem_exit();
-	#endif
 
 	#ifdef __amigaos4__
 		amiga_close_libs();

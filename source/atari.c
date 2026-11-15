@@ -17,7 +17,8 @@
  * needs our SDL build, whose GEM driver shows us every AES message first
  * (SDL_AtariGem_SetMessageHook), so we also get the messages of our own
  * windows: the keyboard window (View > Keyboard), the About window and the
- * Hardware dialog (Options > Hardware..., a CF-Lib window dialog).
+ * the Hardware, Sound and GUI options dialogs (Options menu, CF-Lib
+ * window dialogs).
  */
 
 #include <stdio.h>
@@ -35,9 +36,12 @@
 #include "sdl_engine.h"
 #include "atari.h"
 #include "atari/sz81_rsc.h"
+#include "atari/cftabs.h"
+#include "atari/colsel.h"
+#include "atari/aesfix.h"
 
 /* Version of the Atari port, shown in the About window */
-#define ATARI_VERSION "0.8.5"
+#define ATARI_VERSION "0.9"
 
 char *atari_file_request_retval = NULL;
 
@@ -71,7 +75,7 @@ int atari_aes_available(void) {
 /***************************************************************************
  * Resource file                                                           *
  ***************************************************************************/
-/* SZ81.RSC next to the program holds the menu bar, the Hardware dialog and
+/* SZ81.RSC next to the program holds the menu bar, the Settings dialog and
  * all texts of the GEM user interface (written by atari/mkrsc.py), so it
  * can be translated with a resource editor. It is only needed under a
  * multitasking AES, where SDL uses its GEM driver. */
@@ -98,6 +102,8 @@ static int rs_alert(int i) {
  * Kbdvbase() returns) for every keyboard byte; FreeMiNT and SDL chain their
  * own keyboard handling into the same vector. Our handler goes in front,
  * notes make/break codes in two 128-byte tables and passes every byte on.
+ * A second handler in the joystick vector (joyvec) keeps the state of the
+ * joystick in port 1; SDL reads no joystick under its GEM driver.
  *
  * The handler runs in interrupts while any process may be active, so it is
  * copied into global memory. It is removed at exit (atexit), on fatal
@@ -106,6 +112,7 @@ static int rs_alert(int i) {
 
 extern char ikbd_hook_start[], ikbd_hook_end[], ikbd_hook_old[];
 extern char ikbd_hook_handler[], ikbd_hook_down[], ikbd_hook_hit[];
+extern char ikbd_hook_joy_old[], ikbd_hook_joy_handler[], ikbd_hook_joy[];
 extern long ikbd_term_old;
 void ikbd_term_stub(void);
 long ikbd_remove_super(void);
@@ -122,10 +129,10 @@ long ikbd_remove_super(void);
 #define SC_ENTER  0x72
 
 static char *hook_mem;			/* copy of the handler block */
-static volatile unsigned char *kdown, *khit;
-static long *kbdvec;
-static long hook_handler;		/* our handler in hook_mem */
-static int hook_active, term_hooked, mint;
+static volatile unsigned char *kdown, *khit, *kjoy;
+static long *kbdvec, *joyvec;
+static long hook_handler, joy_handler;	/* our handlers in hook_mem */
+static int hook_active, joy_active, term_hooked, mint;
 static long cpu;
 static unsigned short tos_version;
 static SDLKey scan_sym[128];
@@ -173,31 +180,45 @@ static void flush_caches(void) {
 
 static long super_install(void) {
 	*(long *)(hook_mem + HOOK_OFF(ikbd_hook_old)) = *kbdvec;
+	*(long *)(hook_mem + HOOK_OFF(ikbd_hook_joy_old)) = *joyvec;
 	flush_caches();
 	*kbdvec = hook_handler;
+	*joyvec = joy_handler;
+	joy_active = TRUE;
 	return 0;
 }
 
-/* Unlink our handler from the kbdvec chain (supervisor mode). Also called
- * by the etv_term stub. */
-long ikbd_remove_super(void) {
-	long *p = kbdvec;
+/* Unlink a handler from the chain of handlers that starts at vec, old is
+ * its XBRA link. On exit: returns TRUE if it was found */
+static int unlink_handler(long *vec, long handler, long old) {
+	long *p = vec;
 	int n;
 
-	if (!hook_active) return 0;
 	for (n = 0; n < 32 && *p; n++) {
 		long *x;
 
-		if (*p == hook_handler) {
-			*p = *(long *)(hook_mem + HOOK_OFF(ikbd_hook_old));
-			hook_active = FALSE;
-			break;
+		if (*p == handler) {
+			*p = old;
+			return TRUE;
 		}
 		x = (long *)(*p - 12);	/* XBRA header in front of a handler */
 		if (x[0] != 0x58425241L)	/* 'XBRA' */
 			break;
 		p = &x[2];
 	}
+	return FALSE;
+}
+
+/* Unlink our handlers from the kbdvec and joyvec chains (supervisor mode).
+ * Also called by the etv_term stub. */
+long ikbd_remove_super(void) {
+	if (!hook_active) return 0;
+	if (joy_active && unlink_handler(joyvec, joy_handler,
+		*(long *)(hook_mem + HOOK_OFF(ikbd_hook_joy_old))))
+		joy_active = FALSE;
+	if (unlink_handler(kbdvec, hook_handler,
+		*(long *)(hook_mem + HOOK_OFF(ikbd_hook_old))))
+		hook_active = FALSE;
 	/* Plain TOS has one global etv_term: put the old one back (MiNT keeps
 	 * one per process, which ends with us) */
 	if (term_hooked && !mint) {
@@ -213,7 +234,7 @@ static void ikbd_remove(void) {
 		Setexc(0x102, (void (*)())ikbd_term_old);
 		term_hooked = FALSE;
 	}
-	if (!hook_active && hook_mem) {
+	if (!hook_active && !joy_active && hook_mem) {
 		Mfree(hook_mem);
 		hook_mem = NULL;
 	}
@@ -282,8 +303,12 @@ static int ikbd_install(void) {
 	khit = (volatile unsigned char *)(hook_mem + HOOK_OFF(ikbd_hook_hit));
 	memset((void *)kdown, 0, 128);
 	memset((void *)khit, 0, 128);
+	kjoy = (volatile unsigned char *)(hook_mem + HOOK_OFF(ikbd_hook_joy));
+	*kjoy = 0;
 	hook_handler = (long)(hook_mem + HOOK_OFF(ikbd_hook_handler));
+	joy_handler = (long)(hook_mem + HOOK_OFF(ikbd_hook_joy_handler));
 	kbdvec = (long *)Kbdvbase() - 1;
+	joyvec = (long *)&((_KBDVECS *)Kbdvbase())->joyvec;
 
 	unshift = ((_KEYTAB *)Keytbl((void *)-1, (void *)-1, (void *)-1))->unshift;
 	for (sc = 0; sc < 128; sc++)
@@ -370,9 +395,11 @@ static int menu_shortcut(int sc);
 static short our_top_window(void);
 static short kb_handle, ab_handle;
 static int ab_close_pending;
-static WDIALOG *hw_wd;
-static int hw_is_open(void);
-static void hw_key(int sc, const unsigned char *down);
+static int dlg_any_open(void);
+static int dlg_is_window(short handle);
+static void dlg_key(int sc, const unsigned char *down);
+static int dlg_wants_shift(void);
+static void joy_pump(int focus);
 
 /* Turn the key changes since the last pump into SDL key events: modifier
  * presses first, so Shift+P reaches the ZX81 as Shift+P, and modifier
@@ -385,16 +412,21 @@ static void ikbd_pump(void) {
 
 	/* The emulator keeps the keys while its keyboard window is on top. The
 	 * About window takes them: Return, Enter and Escape close it. The
-	 * Hardware dialog gets them through CF-Lib */
+	 * Settings dialog gets them through CF-Lib, Shift too while a box of
+	 * its Joystick page waits for a key */
 	top = our_top_window();
 	if (top >= 0 && top == ab_handle) {
 		if (khit[SC_RETURN] || khit[SC_ENTER] || khit[SC_ESC]) ab_close_pending = TRUE;
+		for (sc = 1; sc < 128; sc++)
+			if (khit[sc] && kdown[SC_ALT] && scan_sym[sc] == SDLK_o) ab_close_pending = TRUE;
 		focus = FALSE;
-	} else if (top >= 0 && hw_is_open() && top == hw_wd->win_handle) {
+	} else if (top >= 0 && dlg_is_window(top)) {
 		for (sc = 0; sc < 128; sc++)
 			now[sc] = kdown[sc] ? 1 : 0;
 		for (sc = 1; sc < 128; sc++)
-			if (khit[sc] && !is_modifier(sc)) hw_key(sc, now);
+			if (khit[sc] && (!is_modifier(sc) ||
+				(dlg_wants_shift() && (sc == SC_LSHIFT || sc == SC_RSHIFT))))
+				dlg_key(sc, now);
 		focus = FALSE;
 	} else {
 		focus = (SDL_GetAppState() & SDL_APPINPUTFOCUS) != 0
@@ -437,6 +469,7 @@ static void ikbd_pump(void) {
 	}
 
 	memcpy(key_prev, now, sizeof(key_prev));
+	joy_pump(focus);
 }
 
 /* After a dialog: the keys used in it are not for the emulator */
@@ -539,7 +572,48 @@ static Uint32 kb_lit_until[KB_KEYS];
 static int kb_click = -1;				/* key held by the mouse */
 static int kb_shift_latched;
 static Uint32 kb_click_until;
-static short kb_mb_prev;
+
+/* The mouse, read once a frame for all our windows. mouse_click is a new
+ * press of the left button: one that SDL's GEM driver got from the AES
+ * since the last frame (button_hook(); XaAES gives a click only to a
+ * program that waits for it, and a click shorter than a frame is not seen
+ * by graf_mkstate()), or the button down now and not in the last frame.
+ * The window that takes a click clears mouse_click. */
+static short mouse_x, mouse_y, mouse_b, mouse_k, mouse_prev;
+static int mouse_click;
+static volatile int hook_click;
+static short hook_x, hook_y;
+
+/* Only in our SDL build, as SDL_AtariGem_SetMessageHook() */
+extern void SDL_AtariGem_SetButtonHook(void (*hook)(short x, short y,
+	short state, short kstate, short clicks)) __attribute__((weak));
+
+static void button_hook(short x, short y, short state, short kstate, short clicks) {
+	(void)state; (void)kstate; (void)clicks;
+	hook_x = x;
+	hook_y = y;
+	hook_click = TRUE;
+}
+
+static void mouse_poll(void) {
+	graf_mkstate(&mouse_x, &mouse_y, &mouse_b, &mouse_k);
+	mouse_click = hook_click || ((mouse_b & 1) && !(mouse_prev & 1));
+	if (hook_click) {
+		mouse_x = hook_x;		/* where it was pressed */
+		mouse_y = hook_y;
+		hook_click = FALSE;
+	}
+	mouse_prev = mouse_b;
+}
+
+/* After a modal action, and when a window opens from the menu: a button
+ * held now is no new press */
+static void mouse_flush(void) {
+	graf_mkstate(&mouse_x, &mouse_y, &mouse_b, &mouse_k);
+	hook_click = FALSE;
+	mouse_prev = 1;
+	mouse_click = FALSE;
+}
 
 static void kb_free(void) {
 	int i;
@@ -820,14 +894,14 @@ static void kb_close(void) {
 
 static void ab_close(void);
 static void ab_free(void);
-static void hw_close(void);
+static void dlg_close_all(void);
 
 static void windows_exit(void) {
 	kb_close();
 	kb_free();
 	ab_close();
 	ab_free();
-	hw_close();
+	dlg_close_all();
 	if (vdi_handle) v_clsvwk(vdi_handle);
 	vdi_handle = 0;
 }
@@ -948,7 +1022,7 @@ static int kb_key_at(short mx, short my) {
 
 /* Every frame: clicks on the keys and the yellow keys */
 static void kb_poll(void) {
-	short mx, my, mb, ks;
+	short mx, my, mb;
 	GRECT work, kr;
 	Uint32 now;
 	int i, lit;
@@ -956,9 +1030,12 @@ static void kb_poll(void) {
 	if (kb_handle < 0 || kb_machine < 0) return;
 	now = SDL_GetTicks();
 
-	graf_mkstate(&mx, &my, &mb, &ks);
-	if ((mb & 1) && !(kb_mb_prev & 1) && kb_click < 0 &&
+	mx = mouse_x;
+	my = mouse_y;
+	mb = mouse_b;
+	if (mouse_click && kb_click < 0 &&
 		wind_find(mx, my) == kb_handle && (i = kb_key_at(mx, my)) >= 0) {
+		mouse_click = FALSE;
 		if (i == KB_SHIFT) {
 			/* SHIFT stays down until the next key */
 			kb_shift_latched = !kb_shift_latched;
@@ -971,7 +1048,6 @@ static void kb_poll(void) {
 	}
 	if (!(mb & 1) && kb_click >= 0 && (Sint32)(now - kb_click_until) >= 0)
 		kb_release_click();
-	kb_mb_prev = mb;
 
 	wind_get_grect(kb_handle, WF_WORKXYWH, &work);
 	for (i = 0; i < KB_KEYS; i++) {
@@ -993,7 +1069,7 @@ static void kb_poll(void) {
 static short our_top_window(void) {
 	short top, dummy;
 
-	if (kb_handle < 0 && ab_handle < 0 && !hw_is_open()) return -1;
+	if (kb_handle < 0 && ab_handle < 0 && !dlg_any_open()) return -1;
 	wind_get(0, WF_TOP, &top, &dummy, &dummy, &dummy);
 	return top;
 }
@@ -1240,8 +1316,8 @@ static void ab_layout(void) {
 		if ((int)strlen(ab_lines[i]) * cw > text_w) text_w = strlen(ab_lines[i]) * cw;
 		text_h += ab_lines[i][0] ? ch : ch / 2;
 	}
-	bw = 8 * cw;
-	bh = ch + 4;
+	bw = 9 * cw;
+	bh = ch + 2 < 17 ? 17 : ch + 2;		/* as in the Settings dialog */
 	text_x = AB_PIC_X + ab_w + AB_MARGIN;
 	content = AB_NAME_H + ch / 2 + text_h + ch / 2 + bh + AB_MARGIN / 2;
 	w = text_x + text_w + AB_MARGIN;
@@ -1264,9 +1340,14 @@ static void ab_layout(void) {
 		ab_tree[AB_LINE0 + i].ob_spec.free_string = (char *)ab_lines[i];
 		y += ab_lines[i][0] ? ch : ch / 2;
 	}
-	ab_obj(AB_OK, AB_ROOT, G_BUTTON, OF_SELECTABLE | OF_DEFAULT | OF_EXIT | OF_LASTOB,
+	/* An exit button as in the dialogs: 3D, MagiC style with the shortcut
+	 * Alt+O (fix_dial() draws it where the AES cannot) */
+	ab_obj(AB_OK, AB_ROOT, G_BUTTON, OF_SELECTABLE | OF_DEFAULT | OF_EXIT | OF_FL3DACT | OF_LASTOB,
 		w - AB_MARGIN - bw, h - AB_MARGIN / 2 - bh, bw, bh);
+	ab_tree[AB_OK].ob_state = OS_WHITEBAK;
 	ab_tree[AB_OK].ob_spec.free_string = rs(FS_AB_OK);
+	fix_dial(ab_tree);
+	aesfix_userdefs(ab_tree);
 }
 
 static void ab_draw(const GRECT *area) {
@@ -1339,8 +1420,11 @@ static void ab_open(void) {
 		rs_alert(AL_NOABPIC);
 		return;
 	}
-	ab_texts();
-	ab_layout();
+	/* The tree once: the photo and the texts stay the same */
+	if (!ab_tree[AB_ROOT].ob_width) {
+		ab_texts();
+		ab_layout();
+	}
 
 	wind_get_grect(0, WF_WORKXYWH, &desk);
 	if ((ab_handle = wind_create_grect(NAME | CLOSER | MOVER, &desk)) < 0) {
@@ -1363,324 +1447,836 @@ static void ab_open(void) {
 
 /* Every frame: the OK button and the keys that close the window */
 static void ab_poll(void) {
-	short mx, my, mb, ks;
-
 	if (ab_handle < 0) return;
 	if (ab_close_pending) {
 		ab_close_pending = FALSE;
 		ab_close();
 		return;
 	}
-	graf_mkstate(&mx, &my, &mb, &ks);
-	if (!(mb & 1) || our_top_window() != ab_handle) return;
-	if (objc_find(ab_tree, AB_ROOT, MAX_DEPTH, mx, my) != AB_OK) return;
+	if (!mouse_click || our_top_window() != ab_handle) return;
+	if (objc_find(ab_tree, AB_ROOT, MAX_DEPTH, mouse_x, mouse_y) != AB_OK) return;
+	mouse_click = FALSE;
 	wind_update(BEG_MCTRL);
 	if (graf_watchbox(ab_tree, AB_OK, OS_SELECTED, OS_NORMAL)) {
 		wind_update(END_MCTRL);
+		mouse_flush();
 		ab_close();
 		return;
 	}
 	wind_update(END_MCTRL);
+	mouse_flush();
 }
 
 /***************************************************************************
- * Hardware dialog (Options > Hardware...)                                 *
+ * Settings dialog (Options > Hardware..., Sound..., GUI options...,       *
+ * Joystick...)                                                            *
  ***************************************************************************/
-/* The settings of the first page of sz81's own options (F2) in a CF-Lib
- * window dialog, tree T_HARDWARE of SZ81.RSC. hw_layout() sets the rows in
- * pixels so that buttons are at least 17 pixels high. Object 1 is a MagiC
- * title, which CF-Lib makes the window name; fix_dial() turns the MagiC
- * objects into user objects where the AES lacks them. RAM size, frameskip
- * and speed are popups (handle_popup) whose entries are in the order of
- * hw_ram_sizes, 0..MAX_FRAMESKIP and 200/100/66/50%; a click on a label
- * steps to the next entry.
+/* sz81's own options pages (F2) as one CF-Lib window dialog with tab cards
+ * (atari/cftabs.c). T_SETTINGS has the title (object 1, which CF-Lib makes
+ * the window name), the tab bar, an empty page frame and Cancel/OK. Every
+ * page is a tree of its own (T_HARDWARE, T_SOUND, T_GUIOPTS, T_JOYSTICK);
+ * tabs_init_trees() merges them into a copy of T_SETTINGS, where the page
+ * objects get new numbers: PG(page, object). fix_dial() turns the MagiC
+ * objects into user objects where the AES lacks them; aesfix_userdefs()
+ * lets the user objects draw on a stack of our own (TOS 1.04).
  *
  * SDL's GEM driver owns evnt_multi, so the dialog is fed by hand: window
  * messages from gem_message, keys from the IKBD hook (ikbd_pump queues
- * them while the dialog is on top), clicks by polling graf_mkstate.
- * OK applies the settings as sz81's own Save does; a new machine, RAM
- * size or M1NOT resets the emulated machine, so OK asks first. */
+ * them while the dialog is on top; CF-Lib gives them to the top window),
+ * clicks by polling graf_mkstate. OK applies the settings of all pages as
+ * sz81's own Save does; a change that resets the emulated machine asks
+ * first. */
 
-#define HW_RAM_N 10
-#define HW_KEYS 16
+#define DLG_KEYS 16
 
-static const int hw_ram_sizes[HW_RAM_N] = { 1, 2, 3, 4, 16, 24, 32, 40, 48, 56 };
+#define PAGE_HW 0
+#define PAGE_SOUND 1
+#define PAGE_GUI 2
+#define PAGE_JOY 3
+#define NPAGES 4
 
-static OBJECT *hw_tree, *hw_ram_pop, *hw_fskip_pop, *hw_speed_pop;
-static WDIALOG *hw_wd;
-static int hw_keys[HW_KEYS], hw_nkeys;	/* keys typed while it is on top */
-static short hw_kstate, hw_mb_prev;
+#define PG(page, o) tabs_obj(&st_tabs, (page), (o))
+#define HW(o) PG(PAGE_HW, (o))
+#define SD(o) PG(PAGE_SOUND, (o))
+#define GU(o) PG(PAGE_GUI, (o))
+#define JS(o) PG(PAGE_JOY, (o))
 
-/* After rsrc_load the y of an object in a frame is its row (1 = first)
- * times the character height; this gives the rows and frames their pixels
- * and puts the buttons in a row below the frames */
-static void hw_layout(void) {
-	short bh = gl_hchar + 2 < 17 ? 17 : gl_hchar + 2;		/* button height */
-	short rh = bh + (gl_hchar >= 16 ? gl_hchar / 4 : 1);	/* row */
-	short ft = gl_hchar + gl_hchar / 4;						/* frame title */
-	short gap = gl_hchar / 2;
-	short y, i, o, rows, h;
-	OBJECT *t = hw_tree;
+extern _WORD cf_vdi_handle;
 
-	t[HW_TITLE].ob_x = gl_wchar;
-	t[HW_TITLE].ob_y = gl_hchar;
-	t[HW_TITLE].ob_width = t[ROOT].ob_width - 2 * gl_wchar;
-	t[HW_TITLE].ob_height = gl_hchar + 2;
-	y = t[HW_TITLE].ob_y + t[HW_TITLE].ob_height + gl_hchar;
+static const int page_trees[NPAGES] = { T_HARDWARE, T_SOUND, T_GUIOPTS, T_JOYSTICK };
+static CFTABS st_tabs;
+static OBJECT *st_tree;		/* T_SETTINGS with all pages, NULL before st_init */
+static WDIALOG *st_wd;
 
-	for (i = t[ROOT].ob_head; i != ROOT; i = t[i].ob_next) {
-		if (t[i].ob_head < 0) continue;
-		rows = 0;
-		for (o = t[i].ob_head; o != i; o = t[o].ob_next) {
-			short row = t[o].ob_y / gl_hchar - 1;
+static int dlg_keys[DLG_KEYS], dlg_nkeys;	/* keys typed into the dialog */
+static short dlg_kstate;
 
-			if (row + 1 > rows) rows = row + 1;
-			h = (t[o].ob_type & 0xFF) == G_BUTTON ? bh : gl_hchar;
-			t[o].ob_y = ft + row * rh + (rh - h) / 2;
-			t[o].ob_height = h;
-		}
-		t[i].ob_y = y;
-		t[i].ob_height = ft + rows * rh + 2;
-		y += t[i].ob_height + gap;
+static short button_height(void) {
+	return gl_hchar + 2 < 17 ? 17 : gl_hchar + 2;
+}
+
+/* A page tree is laid out in the resource for an 8x16 font (mkrsc.py), and
+ * is used as it is with such a font. With a smaller one its lines grow to
+ * 16 pixels, as the 3D buttons and radio buttons need that much: the
+ * positions and the frames scale, the other objects keep their height in
+ * the middle of their larger cell (buttons fill it). */
+static void scale_page(OBJECT *t, short parent) {
+	short o;
+
+	for (o = t[parent].ob_head; o != parent && o >= 0; o = t[o].ob_next) {
+		short cell = t[o].ob_height * 16 / gl_hchar;
+
+		t[o].ob_y = t[o].ob_y * 16 / gl_hchar;
+		if (t[o].ob_head >= 0 || (t[o].ob_type & 0xFF) == G_BUTTON)
+			t[o].ob_height = cell;
+		else
+			t[o].ob_y += (cell - t[o].ob_height) / 2;
+		if (t[o].ob_head >= 0) scale_page(t, o);
 	}
-	y += gap;
-	t[HW_CANCEL].ob_y = t[HW_OK].ob_y = y;
-	t[HW_CANCEL].ob_height = t[HW_OK].ob_height = bh;
+	if (parent == ROOT) t[ROOT].ob_height = t[ROOT].ob_height * 16 / gl_hchar;
+}
+
+/* Before fix_dial(): the title, the tab bar (tabs_init_trees() puts it on
+ * the frame), the page frame with a character around the pages, all pages
+ * as high as the highest, and the exit buttons below the frame */
+static void layout_settings(OBJECT *t, OBJECT **pages) {
+	short bh = button_height(), y, i, h, maxh = 0;
+
+	t[ST_TITLE].ob_x = gl_wchar;
+	t[ST_TITLE].ob_y = gl_hchar;
+	t[ST_TITLE].ob_width = t[ROOT].ob_width - 2 * gl_wchar;
+	t[ST_TITLE].ob_height = gl_hchar + 2;
+	y = t[ST_TITLE].ob_y + t[ST_TITLE].ob_height + gl_hchar / 2;
+
+	t[ST_BAR].ob_height = gl_hchar + 6;
+	t[ST_PAGES].ob_x = gl_wchar;
+	t[ST_PAGES].ob_y = y + t[ST_BAR].ob_height;
+	t[ST_PAGES].ob_width = t[ROOT].ob_width - 2 * gl_wchar;
+	for (i = 0; i < NPAGES; i++) {
+		if (gl_hchar < 16) scale_page(pages[i], ROOT);
+		h = pages[i][ROOT].ob_height;
+		if (h > maxh) maxh = h;
+	}
+	for (i = 0; i < NPAGES; i++) {
+		pages[i][ROOT].ob_x = pages[i][ROOT].ob_y = 0;
+		pages[i][ROOT].ob_width = t[ST_PAGES].ob_width - 2 * gl_wchar;
+		pages[i][ROOT].ob_height = maxh;
+	}
+	t[ST_PAGES].ob_height = maxh + 2 * gl_hchar;
+
+	y = t[ST_PAGES].ob_y + t[ST_PAGES].ob_height + gl_hchar;
+	t[ST_CANCEL].ob_y = t[ST_OK].ob_y = y;
+	t[ST_CANCEL].ob_height = t[ST_OK].ob_height = bh;
 	t[ROOT].ob_height = y + bh + gl_hchar;
 }
 
-static void hw_build(void) {
-	rsrc_gaddr(R_TREE, T_HARDWARE, &hw_tree);
-	rsrc_gaddr(R_TREE, T_RAMPOP, &hw_ram_pop);
-	rsrc_gaddr(R_TREE, T_FSKIPPOP, &hw_fskip_pop);
-	rsrc_gaddr(R_TREE, T_SPEEDPOP, &hw_speed_pop);
-	hw_layout();
-	fix_dial(hw_tree);
-	fix_popup(hw_ram_pop, 1);
-	fix_popup(hw_fskip_pop, 1);
-	fix_popup(hw_speed_pop, 1);
-}
+static OBJECT *pops;		/* T_POPUPS: all popups, box PU_... */
 
 /* On exit: returns the number of entries of a popup */
-static int hw_entries(OBJECT *pop) {
+static int pop_entries(int pop) {
 	int i, n = 0;
 
-	for (i = pop[ROOT].ob_head; i != ROOT && i >= 0; i = pop[i].ob_next) n++;
+	for (i = pops[pop].ob_head; i != pop && i >= 0; i = pops[i].ob_next) n++;
 	return n;
 }
 
 /* The box shows entry n of its popup (limited to the entries there are) */
-static void hw_show(int box, OBJECT *pop, int n) {
+static void pop_show(OBJECT *t, int box, int pop, int n) {
 	char s[32];
-	int last = hw_entries(pop) - 1;
+	int last = pop_entries(pop) - 1;
 
-	get_string(pop, pop[ROOT].ob_head + (n < 0 ? 0 : n > last ? last : n), s);
-	set_string(hw_tree, box, s);
+	get_string(pops, pops[pop].ob_head + (n < 0 ? 0 : n > last ? last : n), s);
+	set_string(t, box, s);
 }
 
 /* The entry of a popup that its box shows */
-static int hw_choice(int box, OBJECT *pop) {
-	char s[16], t[16];
+static int pop_choice(OBJECT *t, int box, int pop) {
+	char s[16], u[16];
 	int i;
 
-	get_string(hw_tree, box, s);
-	for (i = pop[ROOT].ob_head; i != ROOT && i >= 0; i = pop[i].ob_next) {
-		get_string(pop, i, t);
-		if (!strcmp(s, t)) return i - pop[ROOT].ob_head;
+	get_string(t, box, s);
+	for (i = pops[pop].ob_head; i != pop && i >= 0; i = pops[i].ob_next) {
+		get_string(pops, i, u);
+		if (!strcmp(s, u)) return i - pops[pop].ob_head;
 	}
 	return 0;
 }
 
-static void hw_radio(int first, int n, int on) {
+/* Radio buttons first..first+n-1 */
+static void radio_set(OBJECT *t, int first, int n, int on) {
 	int i;
 
 	for (i = 0; i < n; i++)
-		set_state(hw_tree, first + i, OS_SELECTED, i == on);
+		set_state(t, first + i, OS_SELECTED, i == on);
 }
 
-static int hw_radio_get(int first, int n) {
+static int radio_get(OBJECT *t, int first, int n) {
 	int i;
 
 	for (i = 0; i < n; i++)
-		if (get_state(hw_tree, first + i, OS_SELECTED)) return i;
+		if (get_state(t, first + i, OS_SELECTED)) return i;
 	return 0;
 }
 
-/* The dialog shows the current settings; zx80 is 0 = ZX81, 1 = ZX80 4K,
- * 2 = ZX80 8K and the radios are ZX80 4K, ZX80 8K, ZX81 */
-static void hw_fill(void) {
+/* An edit field as a number; FALSE if it is empty or out of lo..hi */
+static int field_int(OBJECT *t, int obj, int lo, int hi, int *v) {
+	char s[16], *end;
+	long n;
+
+	get_string(t, obj, s);
+	n = strtol(s, &end, 10);
+	if (end == s || *end || n < lo || n > hi) return FALSE;
+	*v = (int)n;
+	return TRUE;
+}
+
+static void field_set_int(OBJECT *t, int obj, int v) {
+	char s[16];
+
+	sprintf(s, "%d", v);
+	set_string(t, obj, s);
+}
+
+/* sz81's own dialogs keep copies of the settings, so OK waits for them
+ * to be closed. On exit: returns TRUE if one is open */
+static int sz81_dialog_open(void) {
+	int comp = get_active_component();
+
+	if (comp == COMP_VKEYB || comp == COMP_CTB || comp == COMP_EMU) return FALSE;
+	rs_alert(AL_SZ81DIALOG);
+	ikbd_resync();
+	return TRUE;
+}
+
+/* The machine is reset after a change: Cancel or Reset */
+static int ask_reset(int alert) {
+	int answer = rs_alert(alert);
+
+	ikbd_resync();
+	return answer == 2;
+}
+
+/* A wrong value on a page: the alert, then that page */
+static void page_error(int page, int alert) {
+	rs_alert(alert);
+	ikbd_resync();
+	if (st_tabs.active != page)
+		tabs_wdial(&st_tabs, st_wd, tabs_tab(&st_tabs, page));
+}
+
+/* ------------------------------------------------------------ Hardware */
+
+/* RAM size, frameskip and speed are popups (handle_popup) whose entries
+ * are in the order of hw_ram_sizes, 0..MAX_FRAMESKIP and 200/100/66/50%;
+ * a click on a label steps to the next entry */
+#define HW_RAM_N 10
+
+static const int hw_ram_sizes[HW_RAM_N] = { 1, 2, 3, 4, 16, 24, 32, 40, 48, 56 };
+static const int hw_models[3] = { MODEL_ZX80, MODEL_ZX80_8K, MODEL_ZX81 };
+static const int hw_chrgens[3] = { CHRGENSINCLAIR, CHRGENQS, CHRGENCHR16 };
+
+/* zx80 is 0 = ZX81, 1 = ZX80 4K, 2 = ZX80 8K; the radios are ZX80 4K,
+ * ZX80 8K, ZX81 */
+static void hw_fill(OBJECT *t) {
 	int i, ram = 4;
 
-	hw_radio(HW_ZX80, 3, *sdl_emulator.model == MODEL_ZX81 ? 2 :
+	radio_set(t, HW(HW_ZX80), 3, *sdl_emulator.model == MODEL_ZX81 ? 2 :
 		*sdl_emulator.model == MODEL_ZX80_8K ? 1 : 0);
 	for (i = 0; i < HW_RAM_N; i++)
 		if (hw_ram_sizes[i] == sdl_emulator.ramsize) ram = i;
-	hw_show(HW_RAM, hw_ram_pop, ram);
-	set_state(hw_tree, HW_M1NOT, OS_SELECTED, sdl_emulator.m1not != 0);
-	hw_show(HW_FSKIP, hw_fskip_pop, sdl_emulator.frameskip);
-	hw_show(HW_SPEED, hw_speed_pop, sdl_emulator.speed / 10 - 1);
-	set_state(hw_tree, HW_WRX, OS_SELECTED, sdl_emulator.wrx != HIRESDISABLED);
-	hw_radio(HW_UDGNONE, 3, sdl_emulator.chrgen == CHRGENQS ? 1 :
+	pop_show(t, HW(HW_RAM), PU_RAM, ram);
+	set_state(t, HW(HW_M1NOT), OS_SELECTED, sdl_emulator.m1not != 0);
+	pop_show(t, HW(HW_FSKIP), PU_FSKIP, sdl_emulator.frameskip);
+	pop_show(t, HW(HW_SPEED), PU_SPEED, sdl_emulator.speed / 10 - 1);
+	set_state(t, HW(HW_WRX), OS_SELECTED, sdl_emulator.wrx != HIRESDISABLED);
+	radio_set(t, HW(HW_UDGNONE), 3, sdl_emulator.chrgen == CHRGENQS ? 1 :
 		sdl_emulator.chrgen == CHRGENCHR16 ? 2 : 0);
 }
 
-/* OK: like sz81's Save on its options pages
- * On exit: returns TRUE if the settings were taken */
-static int hw_apply(void) {
-	static const int models[3] = { MODEL_ZX80, MODEL_ZX80_8K, MODEL_ZX81 };
-	static const int chrgens[3] = { CHRGENSINCLAIR, CHRGENQS, CHRGENCHR16 };
-	int model, ram, m1not, fskip, speed, wrx, chrgen, comp;
+/* On exit: returns TRUE if the new hardware resets the machine */
+static int hw_resets(OBJECT *t) {
+	return hw_models[radio_get(t, HW(HW_ZX80), 3)] != *sdl_emulator.model ||
+		hw_ram_sizes[pop_choice(t, HW(HW_RAM), PU_RAM)] != sdl_emulator.ramsize ||
+		(get_state(t, HW(HW_M1NOT), OS_SELECTED) ? 1 : 0) != sdl_emulator.m1not;
+}
 
-	/* sz81's own dialogs keep copies of these settings */
-	comp = get_active_component();
-	if (comp != COMP_VKEYB && comp != COMP_CTB && comp != COMP_EMU) {
-		rs_alert(AL_SZ81DIALOG);
-		ikbd_resync();
-		return FALSE;
-	}
-
-	model = models[hw_radio_get(HW_ZX80, 3)];
-	ram = hw_ram_sizes[hw_choice(HW_RAM, hw_ram_pop)];
-	m1not = get_state(hw_tree, HW_M1NOT, OS_SELECTED) ? 1 : 0;
-	fskip = hw_choice(HW_FSKIP, hw_fskip_pop);
-	speed = (hw_choice(HW_SPEED, hw_speed_pop) + 1) * 10;
-	wrx = get_state(hw_tree, HW_WRX, OS_SELECTED) ? HIRESWRX : HIRESDISABLED;
-	chrgen = chrgens[hw_radio_get(HW_UDGNONE, 3)];
-
-	if (model != *sdl_emulator.model || ram != sdl_emulator.ramsize ||
-		m1not != sdl_emulator.m1not) {
-		int answer = rs_alert(AL_HWRESET);
-
-		ikbd_resync();
-		if (answer != 2) return FALSE;
-	}
+static void hw_apply(OBJECT *t) {
+	int speed = (pop_choice(t, HW(HW_SPEED), PU_SPEED) + 1) * 10;
 
 	/* sz81's component executive notices the changes and resets the
 	 * machine or switches the graphics */
-	*sdl_emulator.model = model;
-	sdl_emulator.ramsize = ram;
-	sdl_emulator.m1not = m1not;
-	sdl_emulator.frameskip = fskip;
-	sdl_emulator.wrx = wrx;
-	sdl_emulator.chrgen = chrgen;
+	*sdl_emulator.model = hw_models[radio_get(t, HW(HW_ZX80), 3)];
+	sdl_emulator.ramsize = hw_ram_sizes[pop_choice(t, HW(HW_RAM), PU_RAM)];
+	sdl_emulator.m1not = get_state(t, HW(HW_M1NOT), OS_SELECTED) ? 1 : 0;
+	sdl_emulator.frameskip = pop_choice(t, HW(HW_FSKIP), PU_FSKIP);
+	sdl_emulator.wrx = get_state(t, HW(HW_WRX), OS_SELECTED) ? HIRESWRX : HIRESDISABLED;
+	sdl_emulator.chrgen = hw_chrgens[radio_get(t, HW(HW_UDGNONE), 3)];
 	if (speed != sdl_emulator.speed) {
 		sdl_emulator.speed = speed;
 		if (sdl_sound.state) sound_framesiz_init();
 	}
-	rcfile.rewrite = TRUE;
+}
+
+/* CF-Lib calls the exit routine while the mouse button is still down. A
+ * popup that opens then takes the release for a click and closes at once,
+ * so the popups wait for the release first */
+static void wait_button_up(void) {
+	short mx, my, mb, ks;
+
+	for (;;) {
+		graf_mkstate(&mx, &my, &mb, &ks);
+		if (!(mb & 1)) break;
+		evnt_timer(10);
+	}
+}
+
+/* pobj is an object of the page tree. On exit: returns TRUE if handled */
+static int hw_touch(OBJECT *t, short pobj) {
+	switch (pobj) {
+		case HW_RAM: case HW_RAMLBL: case HW_FSKIP: case HW_FSKLBL:
+		case HW_SPEED: case HW_SPDLBL:
+			wait_button_up();
+			break;
+	}
+	switch (pobj) {
+		case HW_RAM:
+		case HW_RAMLBL:
+			handle_popup(t, HW(HW_RAM), pops, PU_RAM, pobj == HW_RAM ? POP_OPEN : POP_CYCLE);
+			return TRUE;
+		case HW_FSKIP:
+		case HW_FSKLBL:
+			handle_popup(t, HW(HW_FSKIP), pops, PU_FSKIP, pobj == HW_FSKIP ? POP_OPEN : POP_CYCLE);
+			return TRUE;
+		case HW_SPEED:
+		case HW_SPDLBL:
+			handle_popup(t, HW(HW_SPEED), pops, PU_SPEED, pobj == HW_SPEED ? POP_OPEN : POP_CYCLE);
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* ------------------------------------------------------------ Sound */
+
+/* The radios are None, Quicksilva, ZON X-81, VSYNC */
+static const int sd_devices[4] = { DEVICE_NONE, DEVICE_QUICKSILVA, DEVICE_ZONX, DEVICE_VSYNC };
+
+static void sd_fill(OBJECT *t) {
+	int i, dev = 0;
+
+	for (i = 0; i < 4; i++)
+		if (sd_devices[i] == sdl_sound.device) dev = i;
+	radio_set(t, SD(SD_NONE), 4, dev);
+	set_state(t, SD(SD_ACB), OS_SELECTED, sdl_sound.stereo != 0);
+	field_set_int(t, SD(SD_VOL), sdl_sound.volume);
+}
+
+static int sd_check(OBJECT *t) {
+	int volume;
+
+	if (field_int(t, SD(SD_VOL), 0, 128, &volume)) return TRUE;
+	page_error(PAGE_SOUND, AL_BADVOLUME);
+	return FALSE;
+}
+
+/* As runopts_is_a_reset_scheduled(): sz81 resets the machine for a new
+ * device and for stereo on or off with an AY board.
+ * On exit: returns TRUE if the new sound settings reset the machine */
+static int sd_resets(OBJECT *t) {
+	int device = sd_devices[radio_get(t, SD(SD_NONE), 4)];
+	int stereo = get_state(t, SD(SD_ACB), OS_SELECTED) ? TRUE : FALSE;
+	int ay = device == DEVICE_QUICKSILVA || device == DEVICE_ZONX;
+
+	return device != sdl_sound.device || (ay && stereo != sdl_sound.stereo);
+}
+
+static void sd_apply(OBJECT *t) {
+	sdl_sound.device = sd_devices[radio_get(t, SD(SD_NONE), 4)];
+	sdl_sound.stereo = get_state(t, SD(SD_ACB), OS_SELECTED) ? TRUE : FALSE;
+	field_int(t, SD(SD_VOL), 0, 128, &sdl_sound.volume);
+}
+
+/* ------------------------------------------------------------ GUI options */
+
+/* Ink and paper are colour buttons (atari/colsel.c), which pick one of
+ * the VDI colours. sz81's colours are RGB values: the buttons start with
+ * the nearest VDI colour, and only a colour picked anew replaces the RGB
+ * value, so the exact colours of a palette file stay as they are */
+static short gu_ink_pen, gu_paper_pen;	/* the colours the buttons started with */
+
+static short gu_pen(Uint32 rgb) {
+	short i, n = colsel_count(), best = 0, c[3];
+	long d, best_d = 0x7fffffffL;
+
+	for (i = 0; i < n; i++) {
+		long r, g, b;
+
+		vq_color(cf_vdi_handle, i, 1, c);
+		r = (long)((rgb >> 16) & 0xff) - c[0] * 255L / 1000;
+		g = (long)((rgb >> 8) & 0xff) - c[1] * 255L / 1000;
+		b = (long)(rgb & 0xff) - c[2] * 255L / 1000;
+		d = r * r + g * g + b * b;
+		if (d < best_d) {
+			best_d = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
+static Uint32 gu_rgb(short pen) {
+	short c[3];
+
+	vq_color(cf_vdi_handle, pen, 1, c);
+	return (Uint32)(c[0] * 255L / 1000) << 16 | (Uint32)(c[1] * 255L / 1000) << 8
+		| (Uint32)(c[2] * 255L / 1000);
+}
+
+static void gu_fill(OBJECT *t) {
+	field_set_int(t, GU(GU_DELAY), sdl_key_repeat.delay);
+	field_set_int(t, GU(GU_INTERVAL), sdl_key_repeat.interval);
+	gu_ink_pen = gu_pen(colours.emu_fg & 0xffffff);
+	gu_paper_pen = gu_pen(colours.emu_bg & 0xffffff);
+	colsel_set(t, GU(GU_INK), gu_ink_pen);
+	colsel_set(t, GU(GU_PAPER), gu_paper_pen);
+}
+
+static int gu_check(OBJECT *t) {
+	int v;
+
+	if (field_int(t, GU(GU_DELAY), 80, 520, &v) &&
+		field_int(t, GU(GU_INTERVAL), 80, 520, &v)) return TRUE;
+	page_error(PAGE_GUI, AL_BADREPEAT);
+	return FALSE;
+}
+
+static void gu_apply(OBJECT *t) {
+	short ink = colsel_get(t, GU(GU_INK)), paper = colsel_get(t, GU(GU_PAPER));
+
+	field_int(t, GU(GU_DELAY), 80, 520, &sdl_key_repeat.delay);
+	field_int(t, GU(GU_INTERVAL), 80, 520, &sdl_key_repeat.interval);
+	if (ink != gu_ink_pen) {
+		colours.emu_fg = gu_rgb(ink);
+		video.redraw = TRUE;
+	}
+	if (paper != gu_paper_pen) {
+		colours.emu_bg = gu_rgb(paper);
+		video.redraw = TRUE;
+	}
+}
+
+/* A colour button, or its label: the popup */
+static int gu_touch(short pobj) {
+	short box;
+
+	if (pobj == GU_INK || pobj == GU_INKLBL) box = GU(GU_INK);
+	else if (pobj == GU_PAPER || pobj == GU_PAPERLBL) box = GU(GU_PAPER);
+	else return FALSE;
+	wait_button_up();
+	if (colsel_do(st_tree, box)) redraw_wdobj(st_wd, box);
+	ikbd_resync();
+	return TRUE;
+}
+
+/* ------------------------------------------------------------ Joystick */
+
+/* As in the Jupiter Ace emulator: a cross of boxes shows the keys that the
+ * joystick in port 1 presses; click a box, then press a key. sz81 sees the
+ * joystick as one fire button (0) and two axes, whose ends are buttons 1 to
+ * 4: left, right, up, down (see SDL_JOYAXISMOTION in sdl_input.c). The keys
+ * are sz81 control remappings of these buttons, which go into its rcfile.
+ * The order here: up, down, left, right, fire */
+#define JS_N 5
+#define JS_COMPS (COMP_EMU | COMP_VKEYB)
+
+static const short js_objs[JS_N] = { JS_UP, JS_DOWN, JS_LEFT, JS_RIGHT, JS_FIRE };
+static const int js_ids[JS_N] = { 3, 4, 1, 2, 0 };
+static const unsigned char js_bits[JS_N] = { 0x01, 0x02, 0x04, 0x08, 0x80 };	/* IKBD */
+static const SDLKey js_default[JS_N] = { SDLK_7, SDLK_6, SDLK_5, SDLK_8, SDLK_0 };
+static SDLKey js_keys[JS_N];		/* the keys in the dialog */
+static char js_names[JS_N][4];		/* the texts of the boxes */
+static int js_capture = -1;			/* the box waiting for a key, or -1 */
+static unsigned char joy_prev;		/* the joystick at the previous pump */
+
+/* On exit: returns the index of the remapping of joystick button id in
+ * ctrl_remaps[], or -1 */
+static int js_remap(int id) {
+	int i;
+
+	for (i = 0; i < MAX_CTRL_REMAPS; i++)
+		if (ctrl_remaps[i].device == DEVICE_JOYSTICK && ctrl_remaps[i].id == id &&
+			(ctrl_remaps[i].components & COMP_EMU)) return i;
+	return -1;
+}
+
+/* On exit: returns the key of joystick button id, SDLK_UNKNOWN if none */
+static SDLKey js_key(int id) {
+	int r = js_remap(id);
+
+	if (r < 0 || ctrl_remaps[r].remap_device != DEVICE_KEYBOARD ||
+		ctrl_remaps[r].remap_id <= 0) return SDLK_UNKNOWN;
+	return (SDLKey)ctrl_remaps[r].remap_id;
+}
+
+static void js_set(int id, SDLKey key) {
+	int r = js_remap(id);
+
+	if (r < 0) {
+		for (r = 0; r < MAX_CTRL_REMAPS && ctrl_remaps[r].device != UNDEFINED; r++);
+		if (r == MAX_CTRL_REMAPS) return;
+	}
+	ctrl_remaps[r].components = JS_COMPS;
+	ctrl_remaps[r].protected = FALSE;
+	ctrl_remaps[r].device = DEVICE_JOYSTICK;
+	ctrl_remaps[r].id = id;
+	ctrl_remaps[r].remap_device = DEVICE_KEYBOARD;
+	ctrl_remaps[r].remap_id = key;
+	ctrl_remaps[r].remap_mod_id = UNDEFINED;
+}
+
+/* At the start: without any joystick keys (the first run, or an rcfile of
+ * an older version) the cursor keys 7 6 5 8 and 0 */
+static void js_defaults(void) {
+	int i;
+
+	for (i = 0; i < JS_N; i++)
+		if (js_remap(js_ids[i]) >= 0) return;
+	for (i = 0; i < JS_N; i++)
+		js_set(js_ids[i], js_default[i]);
+}
+
+/* Keys of the ZX80/ZX81 keyboard. On exit: returns the key or SDLK_UNKNOWN */
+static SDLKey js_zx_key(SDLKey k) {
+	if ((k >= SDLK_a && k <= SDLK_z) || (k >= SDLK_0 && k <= SDLK_9) ||
+		k == SDLK_SPACE || k == SDLK_RETURN || k == SDLK_PERIOD || k == SDLK_LSHIFT)
+		return k;
+	if (k == SDLK_KP_ENTER) return SDLK_RETURN;
+	if (k == SDLK_RSHIFT) return SDLK_LSHIFT;
+	return SDLK_UNKNOWN;
+}
+
+/* Box i shows its key */
+static void js_show(int i) {
+	SDLKey k = js_keys[i];
+
+	if ((k >= SDLK_a && k <= SDLK_z) || (k >= SDLK_0 && k <= SDLK_9) || k == SDLK_PERIOD)
+		sprintf(js_names[i], "%c", k >= SDLK_a && k <= SDLK_z ? k - SDLK_a + 'A' : k);
+	else if (k == SDLK_SPACE) strcpy(js_names[i], "SPC");
+	else if (k == SDLK_RETURN) strcpy(js_names[i], "NL");
+	else if (k == SDLK_LSHIFT) strcpy(js_names[i], "SHF");
+	else sprintf(js_names[i], "%.3s", rs(FS_JS_NONE));
+}
+
+/* The hint below the boxes, centred in the frame; a string is drawn
+ * without its background, so the page is drawn again if it is open */
+static void js_hint(int text) {
+	OBJECT *o = &st_tree[JS(JS_HINT)];
+
+	o->ob_spec.free_string = rs(text);
+	o->ob_width = strlen(o->ob_spec.free_string) * gl_wchar;
+	o->ob_x = (st_tree[JS(JS_FRAME)].ob_width - o->ob_width) / 2;
+	if (dlg_any_open()) redraw_wdobj(st_wd, ST_PAGES);
+}
+
+static void js_fill(OBJECT *t) {
+	int i;
+
+	for (i = 0; i < JS_N; i++) {
+		js_keys[i] = js_key(js_ids[i]);
+		js_show(i);
+		set_state(t, JS(js_objs[i]), OS_SELECTED, FALSE);
+	}
+	js_capture = -1;
+	js_hint(FS_JS_HINT);
+}
+
+static void js_apply(void) {
+	int i;
+
+	for (i = 0; i < JS_N; i++)
+		js_set(js_ids[i], js_keys[i]);
+}
+
+/* Box i waits for a key: pressed, and the hint says so */
+static void js_wait(int i) {
+	if (js_capture >= 0 && js_capture != i) {
+		set_state(st_tree, JS(js_objs[js_capture]), OS_SELECTED, FALSE);
+		redraw_wdobj(st_wd, JS(js_objs[js_capture]));
+	}
+	js_capture = i;
+	set_state(st_tree, JS(js_objs[i]), OS_SELECTED, TRUE);
+	redraw_wdobj(st_wd, JS(js_objs[i]));
+	js_hint(FS_JS_PRESS);
+}
+
+/* The wait is over: key for the box, or SDLK_UNKNOWN to leave it as it was */
+static void js_end(SDLKey key) {
+	int i = js_capture;
+
+	if (i < 0) return;
+	js_capture = -1;
+	if (key != SDLK_UNKNOWN) {
+		js_keys[i] = key;
+		js_show(i);
+	}
+	set_state(st_tree, JS(js_objs[i]), OS_SELECTED, FALSE);
+	redraw_wdobj(st_wd, JS(js_objs[i]));
+	js_hint(FS_JS_HINT);
+}
+
+/* A key while a box waits: Escape and Undo end the wait, a key of the
+ * ZX keyboard is taken, other keys are ignored */
+static void js_typed(int sc, short kstate) {
+	SDLKey k;
+
+	if (sc == SC_ESC || sc == 0x61) {
+		js_end(SDLK_UNKNOWN);
+		return;
+	}
+	if (kstate & (K_CTRL | K_ALT)) return;
+	if ((k = js_zx_key(scan_sym[sc])) != SDLK_UNKNOWN) js_end(k);
+}
+
+/* On exit: returns the box of a page object, or -1 */
+static int js_box(short pobj) {
+	int i;
+
+	for (i = 0; i < JS_N; i++)
+		if (js_objs[i] == pobj) return i;
+	return -1;
+}
+
+/* From ikbd_pump: the joystick as SDL joystick button events, which sz81
+ * remaps to keys. Only while sz81 has the keys; else all go up */
+static void joy_pump(int focus) {
+	unsigned char now = focus && joy_active ? *kjoy : 0;
+	SDL_Event event;
+	int i;
+
+	if (now == joy_prev) return;
+	for (i = 0; i < JS_N; i++) {
+		if (!((now ^ joy_prev) & js_bits[i])) continue;
+		if (js_key(js_ids[i]) == SDLK_UNKNOWN) continue;
+		memset(&event, 0, sizeof(event));
+		event.type = now & js_bits[i] ? SDL_JOYBUTTONDOWN : SDL_JOYBUTTONUP;
+		event.jbutton.which = 0;
+		event.jbutton.button = js_ids[i];
+		event.jbutton.state = now & js_bits[i] ? SDL_PRESSED : SDL_RELEASED;
+		SDL_PushEvent(&event);
+	}
+	joy_prev = now;
+}
+
+/* ------------------------------------------------------------ driver */
+
+/* The first time: the trees. On exit: returns FALSE if out of memory */
+static int st_init(void) {
+	static int failed;
+	OBJECT *t, *pages[NPAGES];
+	int i;
+
+	if (st_tree) return TRUE;
+	if (failed) {
+		rs_alert(AL_NOMEM);
+		return FALSE;
+	}
+	rsrc_gaddr(R_TREE, T_SETTINGS, &t);
+	for (i = 0; i < NPAGES; i++)
+		rsrc_gaddr(R_TREE, page_trees[i], &pages[i]);
+	layout_settings(t, pages);
+	fix_dial(t);
+	for (i = 0; i < NPAGES; i++)
+		fix_dial(pages[i]);
+	/* From here on the merged tree, with the page objects at PG() */
+	st_tree = tabs_init_trees(&st_tabs, t, ST_BAR, ST_PAGES, pages, NPAGES, PAGE_HW);
+	colsel_use_vdi(cf_vdi_handle);
+	if (!st_tree || !colsel_button(st_tree, GU(GU_INK), 0) ||
+		!colsel_button(st_tree, GU(GU_PAPER), 0)) {
+		st_tree = NULL;
+		failed = TRUE;
+		rs_alert(AL_NOMEM);
+		return FALSE;
+	}
+	for (i = 0; i < JS_N; i++)
+		st_tree[JS(js_objs[i])].ob_spec.free_string = js_names[i];
+	aesfix_userdefs(st_tree);
+
+	rsrc_gaddr(R_TREE, T_POPUPS, &pops);
+	fix_popup(pops, 1);
+	/* fix_popup() makes the entries G_SHORTCUTs where the AES has them,
+	 * which then get shortcuts; the RAM sizes have too few different
+	 * letters for one each, so they stay plain strings */
+	for (i = pops[PU_RAM].ob_head; i != PU_RAM && i >= 0; i = pops[i].ob_next)
+		if ((pops[i].ob_type & 0xFF) == G_SHORTCUT)
+			pops[i].ob_type = (pops[i].ob_type & 0xFF00) | G_STRING;
+	aesfix_userdefs(pops);
+	return TRUE;
+}
+
+static int dlg_any_open(void) {
+	return st_wd != NULL && (st_wd->mode & WD_OPEN);
+}
+
+/* On exit: returns TRUE if the dialog exists (open or not) */
+static int dlg_any(void) {
+	return st_wd != NULL;
+}
+
+/* On exit: returns TRUE if window handle is the open dialog */
+static int dlg_is_window(short handle) {
+	return dlg_any_open() && st_wd->win_handle == handle;
+}
+
+/* On exit: returns TRUE if a box of the Joystick page waits for a key */
+static int dlg_wants_shift(void) {
+	return dlg_any_open() && js_capture >= 0;
+}
+
+/* OK: all pages. On exit: returns TRUE if the settings were taken */
+static int st_apply(void) {
+	int hw;
+
+	if (!sd_check(st_tree) || !gu_check(st_tree)) return FALSE;
+	hw = hw_resets(st_tree);
+	if ((hw || sd_resets(st_tree)) && !ask_reset(hw ? AL_HWRESET : AL_SNDRESET))
+		return FALSE;
+	hw_apply(st_tree);
+	sd_apply(st_tree);
+	gu_apply(st_tree);
+	js_apply();
 	return TRUE;
 }
 
 /* CF-Lib calls this for exit and touchexit objects, the Undo key and the
  * closer. On exit: returns TRUE to close the dialog */
-static int hw_exit(WDIALOG *wd, short obj) {
+static int st_exit(WDIALOG *wd, short obj) {
+	short page, pobj;
+
+	tabs_which(&st_tabs, obj, &page, &pobj);
+	if (js_capture >= 0 && !(page == PAGE_JOY && js_box(pobj) >= 0))
+		js_end(SDLK_UNKNOWN);
+	if (tabs_wdial(&st_tabs, wd, obj)) return FALSE;	/* a tab */
 	obj &= 0x7FFF;		/* bit 15: double click */
-	switch (obj) {
-		case HW_RAM:
-		case HW_RAMLBL:
-			handle_popup(hw_tree, HW_RAM, hw_ram_pop, ROOT, obj == HW_RAM ? POP_OPEN : POP_CYCLE);
-			return FALSE;
-		case HW_FSKIP:
-		case HW_FSKLBL:
-			handle_popup(hw_tree, HW_FSKIP, hw_fskip_pop, ROOT, obj == HW_FSKIP ? POP_OPEN : POP_CYCLE);
-			return FALSE;
-		case HW_SPEED:
-		case HW_SPDLBL:
-			handle_popup(hw_tree, HW_SPEED, hw_speed_pop, ROOT, obj == HW_SPEED ? POP_OPEN : POP_CYCLE);
-			return FALSE;
-		case HW_OK:
-			if (hw_apply()) return TRUE;
-			set_state(hw_tree, HW_OK, OS_SELECTED, FALSE);
-			redraw_wdobj(wd, HW_OK);
-			return FALSE;
-		default:		/* Cancel, Undo, Escape, the closer */
-			return TRUE;
+	switch (page) {
+		case PAGE_HW:
+			if (hw_touch(st_tree, pobj)) return FALSE;
+			break;
+		case PAGE_GUI:
+			if (gu_touch(pobj)) return FALSE;
+			break;
+		case PAGE_JOY:
+			if (js_box(pobj) >= 0) {
+				js_wait(js_box(pobj));
+				return FALSE;
+			}
+			break;
 	}
+	if (page >= 0) return FALSE;
+	if (obj == ST_OK) {
+		if (!sz81_dialog_open() && st_apply()) {
+			rcfile.rewrite = TRUE;
+			return TRUE;
+		}
+		set_state(st_tree, ST_OK, OS_SELECTED, FALSE);
+		redraw_wdobj(wd, ST_OK);
+		return FALSE;
+	}
+	return TRUE;		/* Cancel, Undo, Escape, the closer */
 }
 
-static int hw_is_open(void) {
-	return hw_wd != NULL && (hw_wd->mode & WD_OPEN);
-}
-
-static void hw_open(void) {
-	static int built;
-
-	if (hw_is_open()) {
-		wind_set(hw_wd->win_handle, WF_TOP, 0, 0, 0, 0);
+/* Opens the dialog on a page, or shows the page if it is open */
+static void dlg_open(int page) {
+	if (dlg_any_open()) {
+		wind_set(st_wd->win_handle, WF_TOP, 0, 0, 0, 0);
+		if (page != st_tabs.active) {
+			js_end(SDLK_UNKNOWN);
+			tabs_wdial(&st_tabs, st_wd, tabs_tab(&st_tabs, page));
+		}
 		return;
 	}
-	if (!built) {
-		hw_build();
-		built = TRUE;
-	}
-	if (!hw_wd && !(hw_wd = create_wdial(hw_tree, NULL, 0, WOCB_NULL, hw_exit))) {
+	if (!st_init()) return;
+	tabs_show(&st_tabs, page);
+	hw_fill(st_tree);
+	sd_fill(st_tree);
+	gu_fill(st_tree);
+	js_fill(st_tree);
+	if (!st_wd && !(st_wd = create_wdial(st_tree, NULL, 0, WOCB_NULL, st_exit))) {
 		rs_alert(AL_NOMEM);
 		return;
 	}
-	hw_fill();
-	hw_nkeys = 0;
-	hw_mb_prev = 1;		/* the button that chose the menu entry */
+	/* The cursor in the first edit field of the page */
+	st_wd->edit_obj = page == PAGE_SOUND ? SD(SD_VOL) : page == PAGE_GUI ? GU(GU_DELAY) : 0;
+	st_wd->edit_idx = 0;
+	dlg_nkeys = 0;
+	mouse_flush();	/* the button that chose the menu entry */
 	/* Centred the first time, then where it was */
-	open_wdial(hw_wd, -1, -1);
-	if (hw_wd->win_handle <= 0)
+	open_wdial(st_wd, -1, -1);
+	if (st_wd->win_handle <= 0)
 		rs_alert(AL_NOWINDOW);
 }
 
-static void hw_close(void) {
-	if (!hw_wd) return;
-	close_wdial(hw_wd);
-	delete_wdial(hw_wd);
-	hw_wd = NULL;
+static void dlg_close_all(void) {
+	if (!st_wd) return;
+	close_wdial(st_wd);
+	delete_wdial(st_wd);
+	st_wd = NULL;
+	js_capture = -1;
 }
 
 /* From ikbd_pump while the dialog is on top */
-static void hw_key(int sc, const unsigned char *down) {
-	if (hw_nkeys >= HW_KEYS) return;
-	hw_kstate = (down[SC_LSHIFT] ? K_LSHIFT : 0) | (down[SC_RSHIFT] ? K_RSHIFT : 0)
+static void dlg_key(int sc, const unsigned char *down) {
+	if (dlg_nkeys >= DLG_KEYS) return;
+	dlg_kstate = (down[SC_LSHIFT] ? K_LSHIFT : 0) | (down[SC_RSHIFT] ? K_RSHIFT : 0)
 		| (down[SC_CTRL] ? K_CTRL : 0) | (down[SC_ALT] ? K_ALT : 0);
-	hw_keys[hw_nkeys++] = sc;
+	dlg_keys[dlg_nkeys++] = sc;
 }
 
 /* Every frame: the keys typed into the dialog and a mouse click on it.
- * Keys go to CF-Lib as the AES reports them, scan code and ASCII; Escape
- * acts as Undo (Cancel), Enter as Return */
-static void hw_poll(void) {
+ * Keys go to CF-Lib as the AES reports them, scan code and ASCII (none
+ * with Alt); Escape acts as Undo (Cancel), Enter as Return. While a box
+ * of the Joystick page waits, the keys are for it */
+static void dlg_poll(void) {
 	static _KEYTAB *keytab;
-	short mx, my, mb, ks, top;
+	short top;
 	int i, sc, key;
 
-	if (!hw_is_open()) {
-		hw_nkeys = 0;
+	if (!dlg_any_open()) {
+		dlg_nkeys = 0;
 		return;
 	}
 	if (!keytab) keytab = (_KEYTAB *)Keytbl((void *)-1, (void *)-1, (void *)-1);
-	for (i = 0; i < hw_nkeys && hw_is_open(); i++) {
-		sc = hw_keys[i];
+	for (i = 0; i < dlg_nkeys && dlg_any_open(); i++) {
+		sc = dlg_keys[i];
+		if (js_capture >= 0) {
+			js_typed(sc, dlg_kstate);
+			continue;
+		}
+		if (is_modifier(sc)) continue;
 		if (sc == SC_ESC) {
 			key = 0x6100;
 		} else if (sc == SC_ENTER || sc == SC_RETURN) {
 			key = 0x1c0d;
+		} else if (dlg_kstate & K_ALT) {
+			key = sc << 8;
 		} else {
 			key = (sc << 8) | (unsigned char)
-				((hw_kstate & (K_LSHIFT | K_RSHIFT)) ? keytab->shift : keytab->unshift)[sc];
+				((dlg_kstate & (K_LSHIFT | K_RSHIFT)) ? keytab->shift : keytab->unshift)[sc];
 		}
-		key_wdial(key, hw_kstate);
+		key_wdial(key, dlg_kstate);
 	}
-	hw_nkeys = 0;
-	if (!hw_is_open()) return;
+	dlg_nkeys = 0;
+	if (!dlg_any_open()) return;
 
-	graf_mkstate(&mx, &my, &mb, &ks);
-	if ((mb & 1) && !(hw_mb_prev & 1)) {
+	if (mouse_click) {
 		top = our_top_window();
-		if (top == hw_wd->win_handle && wind_find(mx, my) == top) {
+		if (dlg_is_window(top) && wind_find(mouse_x, mouse_y) == top) {
+			mouse_click = FALSE;
 			wind_update(BEG_MCTRL);
-			click_wdial(1, mx, my, ks, 1);
+			click_wdial(1, mouse_x, mouse_y, mouse_k, 1);
 			wind_update(END_MCTRL);
 			ikbd_resync();
-			graf_mkstate(&mx, &my, &mb, &ks);
+			mouse_flush();
 		}
 	}
-	hw_mb_prev = mb;
 }
 
 /***************************************************************************
@@ -1733,7 +2329,7 @@ static int gem_message(const short *message) {
 	}
 	return window_message(message, kb_handle, kb_draw, kb_close)
 		|| window_message(message, ab_handle, ab_draw, ab_close)
-		|| (hw_wd && message_wdial((short *)message));
+		|| (dlg_any() && message_wdial((short *)message));
 }
 
 /* On exit: returns TRUE if Control and this key are a menu shortcut */
@@ -1811,7 +2407,16 @@ static void menu_do(int item) {
 			refresh_screen = 1;
 			break;
 		case M_HARDWARE:
-			hw_open();
+			dlg_open(PAGE_HW);
+			break;
+		case M_SOUND:
+			dlg_open(PAGE_SOUND);
+			break;
+		case M_GUIOPTS:
+			dlg_open(PAGE_GUI);
+			break;
+		case M_JOYSTICK:
+			dlg_open(PAGE_JOY);
 			break;
 		case M_KEYBOARD:
 			if (kb_handle >= 0) kb_close();
@@ -1840,14 +2445,36 @@ static void update_title(void) {
 
 static int cf_inited;
 
-/* Called after SDL_Quit: undoes init_app and our rsrc_load. A counting AES
- * (MyAES) would otherwise report sz81 as killed, still registered once */
+/* SDL's GEM driver and CF-Lib's init_app() both call appl_init. The link
+ * wraps it (-Wl,--wrap=mt_appl_init in Makefile.atari), so that only the
+ * first call registers with the AES and later ones get the same id: then
+ * SDL_Quit's one appl_exit ends the registration. XaAES kills a process
+ * that calls appl_exit a second time, MyAES counts the calls */
+short __real_mt_appl_init(short *global);
+short __wrap_mt_appl_init(short *global);
+
+short __wrap_mt_appl_init(short *global) {
+	static short apid = -1;
+
+	if (apid < 0) return apid = __real_mt_appl_init(global);
+	return apid;
+}
+
+/* CF-Lib's parts of exit_gem() but appl_exit, which SDL does */
+void exit_userdef(void);
+
+/* Called before SDL_Quit, while sz81 is still registered with the AES:
+ * undoes init_app and our rsrc_load */
 void atari_gem_exit(void) {
 	if (!cf_inited) return;
 	cf_inited = FALSE;
+	tabs_exit();
+	colsel_exit();
 	if (rsc_loaded) rsrc_free();
 	rsc_loaded = FALSE;
-	exit_gem();	/* CF-Lib's VDI workstation, user objects, appl_exit */
+	if (gl_gdos) vst_unload_fonts(cf_vdi_handle, 0);
+	v_clsvwk(cf_vdi_handle);
+	exit_userdef();
 }
 
 void atari_poll(void) {
@@ -1857,8 +2484,8 @@ void atari_poll(void) {
 	if (state < 0) {
 		state = atari_gem_driver();
 		if (state) {
-			/* CF-Lib's globals, VDI workstation and user objects. This is
-			 * a second appl_init after SDL's: atari_gem_exit balances it */
+			/* CF-Lib's globals, VDI workstation and user objects. Its
+			 * appl_init gets SDL's id (see __wrap_mt_appl_init) */
 			init_app(NULL);
 			cf_inited = TRUE;
 			rsc_loaded = rsrc_load("sz81.rsc") != 0;
@@ -1879,17 +2506,21 @@ void atari_poll(void) {
 				atexit(menu_hide);
 			}
 			SDL_AtariGem_SetMessageHook(gem_message);
+			if (SDL_AtariGem_SetButtonHook)
+				SDL_AtariGem_SetButtonHook(button_hook);
 		}
 		if (state && ikbd_install())
 			SDL_SetEventFilter(drop_sdl_keys);
+		if (state) js_defaults();
 	}
 	if (!state) return;
 
 	if (hook_active) ikbd_pump();
 	kb_check_machine();
+	mouse_poll();
 	kb_poll();
 	ab_poll();
-	hw_poll();
+	dlg_poll();
 	update_title();
 	menu_update_checks();
 
@@ -1967,7 +2598,9 @@ char *atari_file_request(const char *title) {
  * PNG screenshots                                                         *
  ***************************************************************************/
 /* A plain 24-bit RGB PNG made with zlib. The rows are compressed one at a
- * time into IDAT chunks, so even a big window needs only small buffers. */
+ * time into IDAT chunks, so even a big window needs only small buffers.
+ * deflate gets a 4 KB window and memLevel 5: about 32 KB of RAM instead of
+ * the 260 KB the defaults take, and the files grow by only a few percent. */
 
 static void png_be32(unsigned char *p, unsigned long v) {
 	p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
@@ -2019,7 +2652,8 @@ int atari_save_png(SDL_Surface *surface, const char *filename) {
 	ok = fwrite(signature, 8, 1, fp) == 1 && png_chunk(fp, "IHDR", ihdr, 13);
 
 	memset(&z, 0, sizeof(z));
-	ok = ok && deflateInit(&z, Z_DEFAULT_COMPRESSION) == Z_OK;
+	ok = ok && deflateInit2(&z, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+		12, 5, Z_DEFAULT_STRATEGY) == Z_OK;
 	if (SDL_MUSTLOCK(surface)) SDL_LockSurface(surface);
 	for (y = 0; ok && y < h; y++) {
 		row[0] = 0;	/* no filter */

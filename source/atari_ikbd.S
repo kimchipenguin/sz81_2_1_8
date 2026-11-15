@@ -6,6 +6,11 @@
 | handler notes the key state and passes the byte on unchanged to the
 | previous handler.
 |
+| The joystick vector (joyvec in the KBDVECS table) gets the IKBD's
+| joystick packets, a0 = the packet: header, port 0, port 1. The handler
+| keeps the state of port 1 (bits 0-3 up, down, left, right, bit 7 fire)
+| in ikbd_hook_joy and chains on.
+|
 | The block from ikbd_hook_start to ikbd_hook_end is copied into global
 | memory (it runs in interrupts while other processes are active), so all
 | references inside it are PC-relative.
@@ -17,6 +22,7 @@
 	.even
 	.globl	_ikbd_hook_start, _ikbd_hook_end, _ikbd_hook_old
 	.globl	_ikbd_hook_handler, _ikbd_hook_down, _ikbd_hook_hit
+	.globl	_ikbd_hook_joy_old, _ikbd_hook_joy_handler, _ikbd_hook_joy
 
 _ikbd_hook_start:
 	.ascii	"XBRA"
@@ -46,6 +52,24 @@ _ikbd_hook_handler:
 	addq.l	#4,%sp			| no old handler: just return
 3:	rts
 
+	.ascii	"XBRA"
+	.ascii	"SZ81"
+_ikbd_hook_joy_old:
+	.long	0
+_ikbd_hook_joy_handler:
+	move.l	%a1,-(%sp)
+	lea	_ikbd_hook_joy(%pc),%a1
+	move.b	2(%a0),(%a1)		| port 1
+	move.l	(%sp)+,%a1
+	move.l	_ikbd_hook_joy_old(%pc),-(%sp)
+	tst.l	(%sp)
+	bne.s	5f
+	addq.l	#4,%sp
+5:	rts
+
+_ikbd_hook_joy:
+	.byte	0
+	.even
 _ikbd_hook_down:
 	.space	128
 _ikbd_hook_hit:

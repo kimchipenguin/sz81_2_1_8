@@ -48,7 +48,10 @@ TARGET=$(ROOT)/sz81$(subst -m,_,$(CPU)).app
 endif
 endif
 SOURCES=sdl_main.c common.c sound.c z80.c loadp.c sdl_engine.c sdl_hotspots.c \
-	sdl_input.c sdl_loadsave.c sdl_resources.c sdl_sound.c sdl_video.c atari.c
+	sdl_input.c sdl_loadsave.c sdl_resources.c sdl_sound.c sdl_video.c atari.c \
+	cftabs.c colsel.c aesfix.c
+# The GEM modules in atari/: tab cards, colour popup, fixes for old AES
+vpath %.c atari
 OBJDIR=obj-atari_$(subst -,_,$(CPUDIR))
 OBJECTS=$(patsubst %.c, $(OBJDIR)/%.o, $(SOURCES)) $(OBJDIR)/atari_ikbd.o
 VERSION=$(shell cat VERSION)
@@ -57,7 +60,9 @@ CFLAGS=$(CPU) -O2 -fomit-frame-pointer
 CFLAGS+=-Wall -fcommon -Wno-unused-result -D_GNU_SOURCE=1 -DVERSION=\"$(VERSION)\" -DENABLE_EMULATION_SPEED_ADJUST \
 	-DPLATFORM_ATARI -DPACKAGE_DATA_DIR=\"$(PACKAGE_DATA_DIR)\" $(SOUNDDEF) -DLOAD_AND_SAVE
 CFLAGS+=$(EXTRA_CFLAGS)
-LDFLAGS=$(CPU)
+# One AES registration for SDL and CF-Lib (see __wrap_mt_appl_init in
+# atari.c); no BACKDROP gadget for CF-Lib's windows on old AES (aesfix.c)
+LDFLAGS=$(CPU) -Wl,--wrap=mt_appl_init -Wl,--wrap=mt_wind_create_grect
 LIBS=-lSDL -lcflib -lgem -lz -lm
 
 ifneq ($(SDL_PREFIX),)
@@ -69,13 +74,13 @@ endif
 
 all: $(TARGET) $(ROOT)/sz81.rsc
 
-# The GEM resource file (menu bar, Hardware dialog, texts) and its header
+# The GEM resource file (menu bar, Settings dialog, texts) and its header
 # come from atari/mkrsc.py; both are in the repository. Once sz81.rsc is
 # edited in a resource editor, keep the header in step by hand.
 $(ROOT)/sz81.rsc atari/sz81_rsc.h: atari/mkrsc.py
 	python3 atari/mkrsc.py $(ROOT)/sz81.rsc atari/sz81_rsc.h
 
-$(OBJDIR)/atari.o: atari/sz81_rsc.h
+$(OBJDIR)/atari.o: atari/sz81_rsc.h atari/cftabs.h atari/colsel.h atari/aesfix.h
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(LDFLAGS) $(OBJECTS) $(LIBS) -o $@

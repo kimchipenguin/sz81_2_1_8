@@ -1,0 +1,84 @@
+diff --git a/src/video/gem/SDL_gemevents.c b/src/video/gem/SDL_gemevents.c
+index 7ba79954..666e6623 100644
+--- a/src/video/gem/SDL_gemevents.c
++++ b/src/video/gem/SDL_gemevents.c
+@@ -95,6 +95,21 @@ void GEM_InitOSKeymap(_THIS)
+ 	SDL_Atari_InitInternalKeymap(this);
+ }
+ 
++/* Local addition (not upstream): the application gets the left button
++   presses the AES reports. The driver itself reads the buttons with
++   graf_mkstate(), which misses a click shorter than the time between two
++   pumps; XaAES gives a click only to a program that waits for it, and the
++   wait below is the only one there is */
++
++static void (*GEM_button_hook)(short x, short y, short state, short kstate,
++	short clicks);
++
++void SDL_AtariGem_SetButtonHook(void (*hook)(short x, short y, short state,
++	short kstate, short clicks))
++{
++	GEM_button_hook = hook;
++}
++
+ void GEM_PumpEvents(_THIS)
+ {
+ 	short prevkc=0, mousex, mousey, mouseb;
+@@ -136,12 +151,31 @@ void GEM_PumpEvents(_THIS)
+ 	em_in.emi_flags = MU_MESAG|MU_TIMER|MU_KEYBD;
+ 	em_in.emi_tlow = 1000;
+ 	em_in.emi_thigh = 0;
++	if (GEM_button_hook) {
++		short mx, my, mb, ks;
++
++		/* A press, not a button that is still held */
++		graf_mkstate(&mx, &my, &mb, &ks);
++		if (!(mb & 1)) {
++			em_in.emi_flags |= MU_BUTTON;
++			em_in.emi_bclicks = 1;
++			em_in.emi_bmask = 1;
++			em_in.emi_bstate = 1;
++		}
++	}
+ 	while (!quit) {
+ 		int resultat;
+ 		short buffer[8];
+ 
+ 		resultat = evnt_multi_fast(&em_in, buffer, &em_out);
+ 
++		/* Button event ? Once per pump */
++		if ((resultat & MU_BUTTON) && GEM_button_hook) {
++			GEM_button_hook(em_out.emo_mouse.p_x, em_out.emo_mouse.p_y,
++				em_out.emo_mbutton, em_out.emo_kmeta, em_out.emo_mclicks);
++			em_in.emi_flags &= ~MU_BUTTON;
++		}
++
+ 		/* Message event ? */
+ 		if (resultat & MU_MESAG)
+ 			quit = do_messages(this, buffer, latest_msg_id);
+@@ -184,11 +218,25 @@ void GEM_PumpEvents(_THIS)
+ 	}
+ }
+ 
++/* Local addition (not upstream): the application sees every message first,
++   so it can handle menu selections and its own windows. A non-zero return
++   means the message was handled and the driver ignores it */
++
++static int (*GEM_message_hook)(const short *message);
++
++void SDL_AtariGem_SetMessageHook(int (*hook)(const short *message))
++{
++	GEM_message_hook = hook;
++}
++
+ static int do_messages(_THIS, short *message, short latest_msg_id)
+ {
+ 	int quit, update_work_area, sdl_resize;
+ 
+ 	quit = update_work_area = sdl_resize = 0;
++	if (GEM_message_hook && GEM_message_hook(message)) {
++		return 0;
++	}
+ 	switch (message[0]) {
+ 		case MSG_SDL_ID:
+ 			quit=(message[1] == latest_msg_id);

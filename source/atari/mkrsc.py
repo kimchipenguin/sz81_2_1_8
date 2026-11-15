@@ -6,16 +6,17 @@ atari/sz81_rsc.h
     atari/mkrsc.py <out.rsc> <out.h>     write both files
     atari/mkrsc.py --dump <file.rsc>     list what is in a resource file
 
-The texts of the GEM user interface (menu bar, Hardware dialog, alerts,
+The texts of the GEM user interface (menu bar, Settings dialog, alerts,
 window titles, the About window) are in SZ81.RSC, next to the program, so
 it can be translated with a resource editor: keep the trees, the order of
 the objects and the order of the free strings, change the texts. The
 writer is the one of the user's CHIP-8 and Pong projects.
 
 Coordinates are in characters; a value can also be given as (chars, pixels),
-stored as pixels * 256 + chars. In the Hardware dialog the y values of the
-objects in a frame are rows (1 = first); the program sets the pixels
-(hw_layout() in atari.c), so that buttons are at least 17 pixels high.
+stored as pixels * 256 + chars. In the pages of the Settings dialog the y
+values of the objects in a frame are rows (1 = first); the program sets the
+pixels (layout_page() in atari.c), so that buttons are at least 17 pixels
+high.
 """
 
 import struct
@@ -77,7 +78,7 @@ def separator(y, w):
     return string(None, '-' * w, 0, y, w, DISABLED)
 
 
-DESK_W, FILE_W, VIEW_W, OPT_W = 21, 22, 16, 15
+DESK_W, FILE_W, VIEW_W, OPT_W = 21, 22, 16, 18
 
 
 def menu_tree():
@@ -114,11 +115,64 @@ def menu_tree():
                 item('M_INVERT', 'Invert', '', 0, VIEW_W),
                 item('M_KEYBOARD', 'Keyboard', '^K', 1, VIEW_W),
             ]),
-            obj('M_OPTBOX', G_BOX, NONE, NORMAL, 0x00FF1100, 20, 0, OPT_W, 1, [
+            obj('M_OPTBOX', G_BOX, NONE, NORMAL, 0x00FF1100, 20, 0, OPT_W, 4, [
                 item('M_HARDWARE', 'Hardware...', '', 0, OPT_W),
+                item('M_SOUND', 'Sound...', '', 1, OPT_W),
+                item('M_GUIOPTS', 'GUI options...', '', 2, OPT_W),
+                item('M_JOYSTICK', 'Joystick...', '', 3, OPT_W),
             ]),
         ]),
     ])
+
+
+# ---------------------------------------------------------------- dialogs
+
+# The settings are one window dialog with tab cards (cftabs.c): the tree
+# T_SETTINGS has the title (object 1, the window name), the tab bar, an
+# empty page frame and the exit buttons; every page is a tree of its own
+# (T_HARDWARE ... T_JOYSTICK, in the order of the tabs), which
+# tabs_init_trees() merges into a copy of T_SETTINGS. Exit buttons keep at
+# least one character apart, as 3D buttons are drawn larger than their
+# rectangle.
+EDIT = EDITABLE | FL3DBAK
+PAGE_W = 38                             # page trees, in characters
+SETTINGS_W = PAGE_W + 4
+BUTTON_W = 9
+OK_X = SETTINGS_W - 2 - BUTTON_W
+CANCEL_X = OK_X - 3 - BUTTON_W
+assert CANCEL_X + BUTTON_W + 1 < OK_X
+
+
+def field(name, text, tmplt, valid, x, y):
+    """An edit field; text is the longest possible value"""
+    return obj(name, G_FBOXTEXT, EDIT, NORMAL,
+               ted(text, tmplt=tmplt, valid=valid), x, y, len(tmplt), 1)
+
+
+# The pages are laid out as they appear with an 8x16 font, so that a
+# resource editor shows them as the program does: one character line per
+# row, group frames with their title on the top line and half a line below
+# the last row. With a smaller font scale_page() in atari.c spreads them
+# out to 16-pixel lines.
+PAGE_H = (11, 0)                        # lines, pixels
+
+
+def page(name, children):
+    """The root of a page tree: a G_BOX, so that it looks like a dialog in
+    a resource editor; cftabs.c makes it an invisible box in the frame"""
+    return obj(name, G_BOX, FL3DBAK, NORMAL, 0x00001100, 0, 0, PAGE_W, PAGE_H, children)
+
+
+def frame(name, title, y, rows, children, pad=False, h=None):
+    """A group frame at line y with rows rows of objects (row 1 = line
+    y + 1). pad puts half a line more above the first and below the last
+    row; h is the height when other rows have pixels as well"""
+    if pad:
+        for c in children:
+            c['y'] = (c['y'], 8)
+    if h is None:
+        h = (rows + 2, 8) if pad else (rows + 1, 8)
+    return obj(name, G_BUTTON, FL3DBAK, MX_FRAME, title, 1, y, 36, h, children)
 
 
 # ---------------------------------------------------------------- Hardware
@@ -126,6 +180,7 @@ def menu_tree():
 RADIO = SELECTABLE | RBUTTON | FL3DBAK
 CHECK = SELECTABLE | FL3DBAK
 EXITBUT = SELECTABLE | EXIT | FL3DACT
+TAB = TOUCHEXIT                         # a tab card (WHITEBAK + shortcut)
 POPBOX = TOUCHEXIT | FL3DBAK
 LABEL = TOUCHEXIT                       # label that steps through its popup
 
@@ -140,39 +195,137 @@ for texts in (RAM_TEXTS, FSKIP_TEXTS, SPEED_TEXTS):
 
 
 def hardware_tree():
-    # Object 1 is a MagiC title: CF-Lib makes it the window name. The
-    # radio buttons of a group follow each other (the program counts on it)
-    return obj('T_HARDWARE', G_BOX, FL3DBAK, NORMAL, 0x00001100, 0, 0, 38, 14, [
-        obj('HW_TITLE', G_STRING, FL3DBAK, MX_TITLE, 'Hardware', 1, 0, 36, (1, 2)),
-        obj('HW_FMACH', G_BUTTON, NONE, MX_FRAME, ' Machine ', 1, 1, 36, 2, [
+    # The radio buttons of a group follow each other (the program counts
+    # on it)
+    return page('T_HARDWARE', [
+        frame('HW_FMACH', ' Machine ', 0, 2, h=(4, 0), children=[
             obj('HW_ZX80', G_BUTTON, RADIO, MX_CHECK(5), 'ZX80 4K', 1, 1, 10, 1),
             obj('HW_ZX80_8K', G_BUTTON, RADIO, MX_CHECK(5), 'ZX80 8K', 12, 1, 10, 1),
             obj('HW_ZX81', G_BUTTON, RADIO, MX_CHECK(3), 'ZX81', 23, 1, 8, 1),
-            obj('HW_RAMLBL', G_STRING, LABEL, MX_SC(0), 'RAM size', 1, 2, 8, 1),
-            obj('HW_RAM', G_BOXTEXT, POPBOX, SHADOWED, ted(RAM_TEXTS[0]), 10, 2, len(RAM_TEXTS[0]), 1),
-            obj('HW_M1NOT', G_BUTTON, CHECK, MX_CHECK(0), 'M1NOT', 23, 2, 9, 1),
+            obj('HW_RAMLBL', G_STRING, LABEL, MX_SC(0), 'RAM size', 1, (2, 8), 8, 1),
+            obj('HW_RAM', G_BOXTEXT, POPBOX, SHADOWED, ted(RAM_TEXTS[0]), 10, (2, 8), len(RAM_TEXTS[0]), 1),
+            obj('HW_M1NOT', G_BUTTON, CHECK, MX_CHECK(0), 'M1NOT', 23, (2, 8), 9, 1),
         ]),
-        obj('HW_FSPEED', G_BUTTON, NONE, MX_FRAME, ' Speed ', 1, 2, 36, 2, [
+        frame('HW_FSPEED', ' Speed ', (4, 8), 1, [
             obj('HW_FSKLBL', G_STRING, LABEL, MX_SC(0), 'Frameskip', 1, 1, 9, 1),
             obj('HW_FSKIP', G_BOXTEXT, POPBOX, SHADOWED, ted(FSKIP_TEXTS[0]), 11, 1, len(FSKIP_TEXTS[0]), 1),
             obj('HW_SPDLBL', G_STRING, LABEL, MX_SC(0), 'Emu speed', 18, 1, 9, 1),
             obj('HW_SPEED', G_BOXTEXT, POPBOX, SHADOWED, ted(SPEED_TEXTS[0]), 28, 1, len(SPEED_TEXTS[0]), 1),
         ]),
-        obj('HW_FGFX', G_BUTTON, NONE, MX_FRAME, ' Graphics ', 1, 3, 36, 2, [
+        frame('HW_FGFX', ' Graphics ', (7, 8), 2, [
             obj('HW_WRX', G_BUTTON, CHECK, MX_CHECK(0), 'WRX hi-res', 1, 1, 13, 1),
             obj('HW_UDGNONE', G_BUTTON, RADIO, MX_CHECK(0), 'No UDG', 1, 2, 10, 1),
             obj('HW_UDG64', G_BUTTON, RADIO, MX_CHECK(4), 'UDG 64', 12, 2, 10, 1),
             obj('HW_UDG128', G_BUTTON, RADIO, MX_CHECK(5), 'UDG 128', 23, 2, 11, 1),
         ]),
-        obj('HW_CANCEL', G_BUTTON, EXITBUT | FLAG11, MX_SC(0), 'Cancel', 17, 4, 9, 1),
-        obj('HW_OK', G_BUTTON, EXITBUT | DEFAULT, MX_SC(0), 'OK', 27, 4, 9, 1),
     ])
 
 
-def popup_tree(name, texts):
+# ---------------------------------------------------------------- Sound
+
+def sound_tree():
+    # The device radios follow each other (the program counts on it); ACB
+    # stereo applies to the two AY boards only
+    return page('T_SOUND', [
+        frame('SD_FDEV', ' Sound device ', 0, 5, [
+            obj('SD_NONE', G_BUTTON, RADIO, MX_CHECK(0), 'None', 1, 1, 8, 1),
+            obj('SD_QS', G_BUTTON, RADIO, MX_CHECK(0), 'Quicksilva sound board', 1, 2, 26, 1),
+            obj('SD_ZONX', G_BUTTON, RADIO, MX_CHECK(7), 'BI-PAK ZON X-81', 1, 3, 19, 1),
+            obj('SD_VSYNC', G_BUTTON, RADIO, MX_CHECK(0), 'VSYNC (TV speaker)', 1, 5, 22, 1),
+            obj('SD_ACB', G_BUTTON, CHECK, MX_CHECK(0), 'ACB stereo (AY boards)', 4, 4, 26, 1),
+        ]),
+        frame('SD_FVOL', ' Volume ', 7, 1, [
+            obj('SD_VOLLBL', G_STRING, NONE, NORMAL, 'Volume', 1, 1, 6, 1),
+            field('SD_VOL', '128', '___', '999', 9, 1),
+            obj(None, G_STRING, NONE, NORMAL, '(0 to 128)', 14, 1, 10, 1),
+        ]),
+    ])
+
+
+# ---------------------------------------------------------------- GUI options
+
+def gui_tree():
+    # Ink and paper are colour buttons: colsel_button() (colsel.c) makes
+    # them USERDEFs; a click on a label (or Alt + its letter) opens the
+    # popup as well
+    return page('T_GUIOPTS', [
+        frame('GU_FREP', ' Key repeat (80 to 520 ms) ', 0, 1, pad=True, children=[
+            obj(None, G_STRING, NONE, NORMAL, 'Delay', 1, 1, 5, 1),
+            field('GU_DELAY', '520', '___', '999', 7, 1),
+            obj(None, G_STRING, NONE, NORMAL, 'ms', 11, 1, 2, 1),
+            obj(None, G_STRING, NONE, NORMAL, 'Interval', 17, 1, 8, 1),
+            field('GU_INTERVAL', '520', '___', '999', 26, 1),
+            obj(None, G_STRING, NONE, NORMAL, 'ms', 30, 1, 2, 1),
+        ]),
+        frame('GU_FCOL', ' Colours ', 4, 1, pad=True, children=[
+            obj('GU_INKLBL', G_STRING, LABEL, MX_SC(0), 'Ink', 1, 1, 5, 1),
+            obj('GU_INK', G_BUTTON, TOUCHEXIT, NORMAL, '', 7, 1, 8, 1),
+            obj('GU_PAPERLBL', G_STRING, LABEL, MX_SC(0), 'Paper', 17, 1, 8, 1),
+            obj('GU_PAPER', G_BUTTON, TOUCHEXIT, NORMAL, '', 26, 1, 8, 1),
+        ]),
+    ])
+
+
+# ---------------------------------------------------------------- Joystick
+
+def joystick_tree():
+    # As in the Jupiter Ace emulator: a cross of boxes that show the keys
+    # the joystick presses; click one, then press a key. The texts of the
+    # boxes and of JS_HINT are set by the program, which also centres the
+    # hint. 3D buttons are drawn larger than their rectangle: an empty line
+    # between the rows of boxes, two characters between the columns
+    key = TOUCHEXIT | FL3DACT
+    return page('T_JOYSTICK', [
+        frame('JS_FRAME', ' Joystick keys ', 0, 9, [
+            string(None, '\x01', 17, 1, 1),
+            obj('JS_UP', G_BUTTON, key, NORMAL, 'XXX', 15, 2, 5, 1),
+            string(None, '\x04', 6, 4, 1),
+            obj('JS_LEFT', G_BUTTON, key, NORMAL, 'XXX', 8, 4, 5, 1),
+            obj('JS_FIRE', G_BUTTON, key, NORMAL, 'XXX', 15, 4, 5, 1),
+            obj('JS_RIGHT', G_BUTTON, key, NORMAL, 'XXX', 22, 4, 5, 1),
+            string(None, '\x03', 28, 4, 1),
+            obj('JS_DOWN', G_BUTTON, key, NORMAL, 'XXX', 15, 6, 5, 1),
+            string(None, '\x02', 17, 7, 1),
+            string('JS_HINT', '', 1, 9, 34),
+        ]),
+    ])
+
+
+# ---------------------------------------------------------------- Settings
+
+def settings_tree():
+    # Object 1 is a MagiC title: CF-Lib makes it the window name. The tab
+    # bar (cftabs.c puts it on top of the frame, only the x of the first
+    # tab counts) and the empty page frame; layout_settings() in atari.c
+    # sets the pixels
+    tabs = obj('ST_BAR', G_IBOX, NONE, NORMAL, 0, 1, 2, SETTINGS_W - 4, 1, [
+        obj('ST_THW', G_BUTTON, TAB, MX_SC(0), 'Hardware', 1, 0, 10, 1),
+        obj('ST_TSOUND', G_BUTTON, TAB, MX_SC(0), 'Sound', 11, 0, 7, 1),
+        obj('ST_TGUI', G_BUTTON, TAB, MX_SC(0), 'GUI', 18, 0, 5, 1),
+        obj('ST_TJOY', G_BUTTON, TAB, MX_SC(0), 'Joystick', 23, 0, 10, 1),
+    ])
+    return obj('T_SETTINGS', G_BOX, FL3DBAK, NORMAL, 0x00001100, 0, 0, SETTINGS_W, 18, [
+        obj('ST_TITLE', G_STRING, FL3DBAK, MX_TITLE, 'Settings', 1, 0, SETTINGS_W - 2, (1, 2)),
+        obj('ST_PAGES', G_BOX, FL3DBAK, NORMAL, 0x00011100, 1, 3, SETTINGS_W - 2, (PAGE_H[0] + 2, PAGE_H[1])),
+        tabs,
+        obj('ST_CANCEL', G_BUTTON, EXITBUT | FLAG11, MX_SC(0), 'Cancel', CANCEL_X, 16, BUTTON_W, 1),
+        obj('ST_OK', G_BUTTON, EXITBUT | DEFAULT, MX_SC(0), 'OK', OK_X, 16, BUTTON_W, 1),
+    ])
+
+
+def popup(name, texts, x, y):
     w = len(texts[0])
-    return obj(name, G_BOX, FL3DBAK, SHADOWED, 0x00FF1100, 0, 0, w, len(texts),
+    return obj(name, G_BOX, FL3DBAK, SHADOWED, 0x00FF1100, x, y, w, len(texts),
                [string(None, t, 0, i, w, flags=SELECTABLE) for i, t in enumerate(texts)])
+
+
+def popups_tree():
+    """All popups in one tree; handle_popup() takes the tree and the box"""
+    return obj('T_POPUPS', G_BOX, NONE, NORMAL, 0x00001100, 0, 0, 23, 12, [
+        popup('PU_RAM', RAM_TEXTS, 2, 1),
+        popup('PU_FSKIP', FSKIP_TEXTS, 9, 1),
+        popup('PU_SPEED', SPEED_TEXTS, 14, 1),
+    ])
 
 
 # ---------------------------------------------------------------- free strings
@@ -195,6 +348,9 @@ FREE_STRINGS = [
     ('FS_AB_LINE7', 'from EightyOne by Michael D Wynne.'),
     ('FS_AB_LINE8', ''),
     ('FS_AB_LINE9', 'ST port by Mia Jaap (mia-jaap.de)'),
+    ('FS_JS_HINT', 'Click a box, then press a key'),
+    ('FS_JS_PRESS', 'Press a key  (Undo: cancel)'),
+    ('FS_JS_NONE', '-'),
     ('AL_NOVDI', '[3][Cannot open a VDI workstation.][  OK  ]'),
     ('AL_NOWINDOW', '[3][No more windows available.][  OK  ]'),
     ('AL_NOKBPIC', '[3][Cannot load the keyboard picture|data\\kbzx80.bmp or kbzx81.bmp.][  OK  ]'),
@@ -202,13 +358,15 @@ FREE_STRINGS = [
     ('AL_NOMEM', '[3][Out of memory.][  OK  ]'),
     ('AL_RESET', '[2][Reset the emulated machine?|The program in memory is lost.][Cancel|Reset]'),
     ('AL_HWRESET', '[2][The new hardware resets the|emulated machine. The|program in memory is lost.][Cancel|Reset]'),
+    ('AL_SNDRESET', '[2][The new sound device resets|the emulated machine. The|program in memory is lost.][Cancel|Reset]'),
+    ('AL_BADVOLUME', '[1][The volume goes from 0 to 128.][  OK  ]'),
+    ('AL_BADREPEAT', '[1][Key repeat delay and interval|go from 80 to 520 ms.][  OK  ]'),
     ('AL_SZ81DIALOG', "[1][Please close sz81's own|dialog first.][  OK  ]"),
 ]
 
-TREES = [menu_tree(), hardware_tree(),
-         popup_tree('T_RAMPOP', RAM_TEXTS),
-         popup_tree('T_FSKIPPOP', FSKIP_TEXTS),
-         popup_tree('T_SPEEDPOP', SPEED_TEXTS)]
+TREES = [menu_tree(), settings_tree(),
+         hardware_tree(), sound_tree(), gui_tree(), joystick_tree(),
+         popups_tree()]
 
 
 # ---------------------------------------------------------------- writer

@@ -19,8 +19,9 @@
 #
 # The patches in atari/sdl-patches are applied to the checkout first. They
 # are for sz81's own builds only and are not meant for upstream SDL:
-#   gem-message-hook.patch  the GEM driver passes on the AES messages it
-#                           does not handle (menu bar)
+#   gem-hooks.patch  the GEM driver passes on the AES messages it does not
+#                    handle (menu bar), and the left button presses it
+#                    waits for (short clicks on sz81's own windows)
 #
 # TOS-compatible configuration as SDL's README.MiNT suggests: no threads
 # (SDL then times with the single SDL_SetTimer alarm), no OpenGL/LDG.
