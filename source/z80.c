@@ -577,7 +577,18 @@ void zx81_loop(void)
     int tswait = 0;
     int tstate_inc;
 
-    do
+    /* Fast path (same result as the loop below, which only matters near a
+       scanline boundary): no HSYNC or VSYNC running or pending, the sync
+       signal stays high and the line counter does not reach HLEN. Then
+       nothing but the two counters changes. */
+    if (SYNC_signal && psync && !hsync_pending && !HSYNC_state && !VSYNC_state &&
+        hsync_counter + (int)ts < HLEN)
+    {
+      hsync_counter += (int)ts;
+      RasterX += (int)ts << 1;
+      states_remaining = 0;
+    }
+    else do
     {
       tstate_inc = states_remaining > MAX_JMP ? MAX_JMP: states_remaining;
       states_remaining -= tstate_inc;

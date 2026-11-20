@@ -40,6 +40,7 @@ void check_events(void)
 /* frame_pause() spins on this until the timer says the next frame is due;
  * the benchmark runs unthrottled, so every frame is due at once. */
 void SDL_Delay(Uint32 ms) { signal_int_flag = 1; }
+void atari_idle(int ms) { signal_int_flag = 1; }
 
 int sdl_load_file(int parameter, int method) { return 1; }
 int sdl_save_file(int parameter, int method) { return 1; }
