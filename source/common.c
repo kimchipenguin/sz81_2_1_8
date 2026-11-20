@@ -30,6 +30,9 @@
 #include "sound.h"
 #include "z80.h"
 #include "allmain.h"
+#ifdef PLATFORM_ATARI
+#include "atari.h"
+#endif
 
 unsigned char mem[65536],*helpscrn;
 unsigned char keyports[9]={0xff,0xff,0xff,0xff, 0xff,0xff,0xff,0xff, 0xff};
@@ -625,7 +628,11 @@ if(sound_enabled)
 #endif
 
 while(!signal_int_flag)
+#ifdef PLATFORM_ATARI
+  atari_idle(10);
+#else
   SDL_Delay(10);
+#endif
 
 signal_int_flag=0;
 

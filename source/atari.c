@@ -595,6 +595,29 @@ static void button_hook(short x, short y, short state, short kstate, short click
 	hook_click = TRUE;
 }
 
+/* The idle time of a frame (frame_pause(), the emulator waits for the next
+ * frame) is spent in evnt_multi() with MU_BUTTON, as the CHIP-8 emulator
+ * does: XaAES gives a click to a program that waits for it, so a short
+ * click is no longer lost between two polls. Only with the GEM driver; the
+ * messages stay in the queue for SDL's own pump, and SDL_Delay(1) runs
+ * SDL's timer and audio background tasks. */
+static int idle_aes;
+
+void atari_idle(int ms) {
+	short msg[8], mx, my, mb, ks, kc, br, flags = MU_TIMER;
+
+	if (!idle_aes) {
+		SDL_Delay(ms);
+		return;
+	}
+	graf_mkstate(&mx, &my, &mb, &ks);
+	if (!(mb & 1)) flags |= MU_BUTTON;	/* a press, not a held button */
+	if (evnt_multi(flags, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, msg,
+			ms, &mx, &my, &mb, &ks, &kc, &br) & MU_BUTTON)
+		button_hook(mx, my, mb, ks, br);
+	SDL_Delay(1);
+}
+
 static void mouse_poll(void) {
 	graf_mkstate(&mouse_x, &mouse_y, &mouse_b, &mouse_k);
 	mouse_click = hook_click || ((mouse_b & 1) && !(mouse_prev & 1));
@@ -2506,6 +2529,7 @@ void atari_poll(void) {
 				atexit(menu_hide);
 			}
 			SDL_AtariGem_SetMessageHook(gem_message);
+			idle_aes = TRUE;
 			if (SDL_AtariGem_SetButtonHook)
 				SDL_AtariGem_SetButtonHook(button_hook);
 		}
