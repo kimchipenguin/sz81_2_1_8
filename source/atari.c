@@ -41,7 +41,7 @@
 #include "atari/aesfix.h"
 
 /* Version of the Atari port, shown in the About window */
-#define ATARI_VERSION "0.9"
+#define ATARI_VERSION "0.9.1"
 
 char *atari_file_request_retval = NULL;
 
