@@ -62,6 +62,7 @@
 /* Notification function IDs */
 #define NOTIFICATION_SHOW 1
 #define NOTIFICATION_KILL 2
+#define NOTIFICATION_ACTIVE 3
 
 /* Notification timeouts in ms */
 #define NOTIFICATION_TIMEOUT_1250 1250
@@ -166,7 +167,7 @@ int vkeyb_init(void);
 int vkeyb_alpha_apply(void);
 int sz81icons_init(void);
 int control_bar_init(void);
-void notification_show(int funcid, struct Notification *notification);
+int notification_show(int funcid, struct Notification *notification);
 
 
 

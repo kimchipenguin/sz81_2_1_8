@@ -1433,7 +1433,7 @@ int sdl_zxroms_init(void) {
  *                        timeouts are sensibly quick, and in fact it
  *                        hasn't been used yet) */
 
-void notification_show(int funcid, struct Notification *notification) {
+int notification_show(int funcid, struct Notification *notification) {
 	Uint32 fg_colour, bg_colour, fg_colourRGB, bg_colourRGB;
 	int window_x, window_y, window_w, window_h;
 	static struct Notification the_nfn;
@@ -1452,6 +1452,11 @@ void notification_show(int funcid, struct Notification *notification) {
 
 		/* Initialise a new notification / overwrite an existing one */
 		the_nfn = *notification; last_time = SDL_GetTicks();
+
+	} else if (funcid == NOTIFICATION_ACTIVE) {
+
+		/* Is one waiting to be shown or to expire? */
+		return the_nfn.timeout > 0;
 
 	} else if (funcid == NOTIFICATION_KILL) {
 
@@ -1573,5 +1578,7 @@ void notification_show(int funcid, struct Notification *notification) {
 
 		}
 	}
+
+	return 0;
 }
 

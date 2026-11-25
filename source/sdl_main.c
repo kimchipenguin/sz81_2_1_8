@@ -589,54 +589,61 @@ void update_scrn(void) {
 		}
 	#endif
 
-	if (!chromamode)
+#ifdef PLATFORM_ATARI
+	/* Monochrome into a 16/32 bit surface: sdl_video_update() draws from scrnbmp */
+	if (!sdl_video_fast_ok())
+#endif
 	{
-		uint64_t* v64ptr = (uint64_t*)vptr;
-		if (sdl_emulator.invert)
+	if (!chromamode)
 		{
-			for (y = 0; y < disp.height; y++)
+			uint64_t* v64ptr = (uint64_t*)vptr;
+			if (sdl_emulator.invert)
 			{
-				for (x = 0; x < disp.width; x += 8)
+				for (y = 0; y < disp.height; y++)
 				{
-					*v64ptr++ = lookupv[*ptr++];
+					for (x = 0; x < disp.width; x += 8)
+					{
+						*v64ptr++ = lookupv[*ptr++];
+					}
+					ptr += disp.padding;
 				}
-				ptr += disp.padding;
+			}
+			else
+			{
+				for (y = 0; y < disp.height; y++)
+				{
+					for (x = 0; x < disp.width; x += 8)
+					{
+						*v64ptr++ = lookup[*ptr++];
+					}
+					ptr += disp.padding;
+				}
 			}
 		}
 		else
 		{
+			unsigned char* cptr = scrnbmpc;
+			uint8_t* vcptr = vptr;
+			unsigned char d, dc;
+			int a, mask;
+	
+			// Ignore invert in chroma mode
 			for (y = 0; y < disp.height; y++)
 			{
 				for (x = 0; x < disp.width; x += 8)
 				{
-					*v64ptr++ = lookup[*ptr++];
+					d = *ptr++;
+					dc = *cptr++;
+					for (a = 0, mask = 0x80; a < 8; a++, mask >>= 1)
+					{
+						*vcptr++ = ((d & mask) ? (dc & 0x0f) : ((dc & 0xf0) >> 4));
+					}
 				}
 				ptr += disp.padding;
+				cptr += disp.padding;
 			}
 		}
-	}
-	else
-	{
-		unsigned char* cptr = scrnbmpc;
-		uint8_t* vcptr = vptr;
-		unsigned char d, dc;
-		int a, mask;
-
-		// Ignore invert in chroma mode
-		for (y = 0; y < disp.height; y++)
-		{
-			for (x = 0; x < disp.width; x += 8)
-			{
-				d = *ptr++;
-				dc = *cptr++;
-				for (a = 0, mask = 0x80; a < 8; a++, mask >>= 1)
-				{
-					*vcptr++ = ((d & mask) ? (dc & 0x0f) : ((dc & 0xf0) >> 4));
-				}
-			}
-			ptr += disp.padding;
-			cptr += disp.padding;
-		}
+	
 	}
 
 	refresh_screen = 0;

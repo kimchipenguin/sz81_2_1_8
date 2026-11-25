@@ -18,6 +18,10 @@
 /* Includes */
 #include "sdl_engine.h"
 #include "common.h"
+#ifdef PLATFORM_ATARI
+#include "fastvideo.h"
+extern unsigned char *const scrnbmp;	/* z80.c */
+#endif
 /* Defines */
 
 /* Variables */
@@ -347,6 +351,29 @@ int cvtChroma(unsigned char c) {
  * Possibly the load selector, vkeyb, control bar, runtime options and associated
  * hotspots will require overlaying */
 
+#ifdef PLATFORM_ATARI
+/* The emulator picture goes from the 1 bit bitmap straight into the surface
+ * (fastvideo.c) when it is monochrome and the surface has 16 or 32 bits;
+ * update_scrn() then skips its 8 bit copy. Chroma uses the old way. */
+int sdl_video_fast_ok(void) {
+	int bpp;
+	int ok;
+
+	ok = sdl_emulator.state && !chromamode && video.screen;
+	#ifdef NO_FASTVIDEO
+	ok = FALSE;
+	#endif
+	if (ok) {
+		bpp = video.screen->format->BitsPerPixel;
+		ok = (bpp == 16 || bpp == 32) && !(disp.width & 7) &&
+			video.scale >= 1 && video.scale <= 3;
+	}
+	/* The old way draws into the surface: fastvideo's idea of it is stale */
+	if (!ok) fv_invalidate();
+	return ok;
+}
+#endif
+
 void sdl_video_update(void) {
 	static bool first = true;
 	static Uint32 fg_colourRGB, bg_colourRGB, colour0RGB, colour1RGB;
@@ -400,7 +427,9 @@ void sdl_video_update(void) {
 		}
 	}
 
-	/* Should everything be redrawn? */
+	/* Should everything be redrawn? (then the surface is wiped) */
+	int redrawn = video.redraw;
+
 	if (video.redraw) {
 		video.redraw = FALSE;
 		/* Wipe the entire screen surface */
@@ -427,6 +456,28 @@ void sdl_video_update(void) {
 
 		if (SDL_MUSTLOCK(video.screen)) SDL_LockSurface(video.screen);
 
+	#ifdef PLATFORM_ATARI
+		if (sdl_video_fast_ok())
+		{
+			/* Clean: nothing but the picture is on the surface, so rows
+			 * that did not change are still right. Anything drawn over it
+			 * (dialogs, keyboard, notification, "Paused") or a wipe means
+			 * the next clean frame draws it all again. */
+			int clean = !redrawn && !sdl_emulator.paused &&
+				get_active_component() == COMP_EMU &&
+				!notification_show(NOTIFICATION_ACTIVE, NULL);
+			int rows = fv_render(scrnbmp, disp.width, disp.height, disp.stride_byte,
+				video.screen->pixels, video.screen->format->BitsPerPixel, video.scale,
+				colour0RGB, colour1RGB, sdl_emulator.invert, clean);
+
+			if (rows == 0 && clean) {
+				/* Same picture, nothing on top: no new frame to show */
+				if (SDL_MUSTLOCK(video.screen)) SDL_UnlockSurface(video.screen);
+				return;
+			}
+		}
+		else
+	#endif
 		if (video.screen->format->BitsPerPixel == 16)
 		{
 			Uint16* screen_pixels = video.screen->pixels;
