@@ -128,7 +128,7 @@ extern unsigned char *memptr[64];
 extern int memattr[64];
 extern unsigned char keyports[9];
 
-extern unsigned long tstates;
+#include "z80regs.h"   /* tstates, may be a register variable */
 extern int help,sound,sound_vsync,sound_ay,sound_ay_type;
 extern int invert_screen;
 

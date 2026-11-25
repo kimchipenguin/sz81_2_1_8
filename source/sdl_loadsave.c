@@ -386,14 +386,14 @@ int sdl_save_file(int parameter, int method) {
             fwrite(&frameNotSync, 1, 1, fp);
 
 			/* Z80 Registers */
-			fwrite(&a, 1, 1, fp);	/* unsigned char */
-			fwrite(&f, 1, 1, fp);
+			{ unsigned char t_ = a; fwrite(&t_, 1, 1, fp); }	/* unsigned char */
+			{ unsigned char t_ = f; fwrite(&t_, 1, 1, fp); }
 			fwrite(&b, 1, 1, fp);
 			fwrite(&c, 1, 1, fp);
 			fwrite(&d, 1, 1, fp);
 			fwrite(&e, 1, 1, fp);
-			fwrite(&h, 1, 1, fp);
-			fwrite(&l, 1, 1, fp);
+			{ unsigned char t_ = h; fwrite(&t_, 1, 1, fp); }
+			{ unsigned char t_ = l; fwrite(&t_, 1, 1, fp); }
 			fwrite(&r, 1, 1, fp);
 			fwrite(&a1, 1, 1, fp);
 			fwrite(&f1, 1, 1, fp);
@@ -407,7 +407,7 @@ int sdl_save_file(int parameter, int method) {
 			fwrite(&iff1, 1, 1, fp);
 			fwrite(&iff2, 1, 1, fp);
 			fwrite(&im, 1, 1, fp);
-			fwrite_unsigned_short_little_endian(&pc, fp);
+			{ unsigned short t_ = pc; fwrite_unsigned_short_little_endian(&t_, fp); }
 			fwrite_unsigned_short_little_endian(&ix, fp);
 			fwrite_unsigned_short_little_endian(&iy, fp);
 			fwrite_unsigned_short_little_endian(&sp, fp);
@@ -430,7 +430,7 @@ int sdl_save_file(int parameter, int method) {
 			fwrite_int_little_endian(&nosync_lines, fp);
 
             /* Variables from common.h */
-            fwrite_unsigned_long_little_endian(&tstates, fp);
+            { unsigned long t_ = tstates; fwrite_unsigned_long_little_endian(&t_, fp); }
             fwrite(&UDGEnabled, 1, 1, fp);
 
             fwrite_int_little_endian(&sound, fp);
@@ -762,14 +762,14 @@ int sdl_load_file(int parameter, int method) {
                     fread(&frameNotSync, 1, 1, fp);
 
                     /* Z80 Registers */
-                    fread(&a, 1, 1, fp);	/* unsigned char */
-                    fread(&f, 1, 1, fp);
+                    { unsigned char t_; fread(&t_, 1, 1, fp); a = t_; }	/* unsigned char */
+                    { unsigned char t_; fread(&t_, 1, 1, fp); f = t_; }
                     fread(&b, 1, 1, fp);
                     fread(&c, 1, 1, fp);
                     fread(&d, 1, 1, fp);
                     fread(&e, 1, 1, fp);
-                    fread(&h, 1, 1, fp);
-                    fread(&l, 1, 1, fp);
+                    { unsigned char t_; fread(&t_, 1, 1, fp); h = t_; }
+                    { unsigned char t_; fread(&t_, 1, 1, fp); l = t_; }
                     fread(&r, 1, 1, fp);
                     fread(&a1, 1, 1, fp);
                     fread(&f1, 1, 1, fp);
@@ -783,7 +783,7 @@ int sdl_load_file(int parameter, int method) {
                     fread(&iff1, 1, 1, fp);
                     fread(&iff2, 1, 1, fp);
                     fread(&im, 1, 1, fp);
-                    fread_unsigned_short_little_endian(&pc, fp);
+                    { unsigned short t_; fread_unsigned_short_little_endian(&t_, fp); pc = t_; }
                     fread_unsigned_short_little_endian(&ix, fp);
                     fread_unsigned_short_little_endian(&iy, fp);
                     fread_unsigned_short_little_endian(&sp, fp);
@@ -806,7 +806,7 @@ int sdl_load_file(int parameter, int method) {
                     fread_int_little_endian(&nosync_lines, fp);
 
                     /* Variables from common.h */
-                    fread_unsigned_long_little_endian(&tstates, fp);
+                    { unsigned long t_; fread_unsigned_long_little_endian(&t_, fp); tstates = t_; }
                     fread(&UDGEnabled, 1, 1, fp);
 
                     fread_int_little_endian(&sound, fp);

@@ -59,9 +59,9 @@ extern bool running_rom;
 extern bool frameNotSync;
 
 /* Z80 state */
-extern unsigned char a, f, b, c, d, e, h, l;
+#include "z80regs.h"
+extern unsigned char b, c, d, e;
 extern unsigned char r, a1, f1, b1, c1, d1, e1, h1, l1, i, iff1, iff2, im;
-extern unsigned short pc;
 extern unsigned short ix, iy, sp;
 extern unsigned char radjust;
 extern unsigned char ixoriy, new_ixoriy;

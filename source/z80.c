@@ -84,7 +84,11 @@ static void loadAndSaveROM(void);
 /* state variables to be preserved in a snap shot*/
 
 /* ZX81 and display state */
+#ifdef Z80_REGVARS
+unsigned long frames = 0;
+#else
 unsigned long tstates = 0, frames = 0;
+#endif
 int framewait = 0;
 int vsx = 0;
 int vsy = 0;
@@ -109,9 +113,15 @@ bool running_rom = false;
 bool frameNotSync = true;
 
 /* Z80 state */
+#ifdef Z80_REGVARS
+unsigned char b, c, d, e;
+#else
 unsigned char a, f, b, c, d, e, h, l;
+#endif
 unsigned char r, a1, f1, b1, c1, d1, e1, h1, l1, i, iff1, iff2, im;
+#ifndef Z80_REGVARS
 unsigned short pc;
+#endif
 unsigned short ix, iy, sp;
 unsigned char radjust;
 unsigned char ixoriy, new_ixoriy;
